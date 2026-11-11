@@ -2,8 +2,8 @@
 name = "sylva-installer"
 version = "0.1.0"
 edition = "2024"
-# edition 2024 需要 1.85；与主工程一致取 1.88（let-chains）。
-rust-version = "1.88"
+# 与主工程 / 当前 stable 工具链保持一致。
+rust-version = "1.99"
 
 # 独立于主工作区（打包工具，不参与主工程的 workspace）
 [workspace]

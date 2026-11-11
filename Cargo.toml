@@ -11,8 +11,8 @@ members = [
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
-# edition 2024 最低要求 1.85；代码中使用 let-chains（if ... && let ...）需 1.88。
-rust-version = "1.88"
+# 与当前 stable 工具链保持一致（最低可用版本）；edition 2024 本身只需 1.85。
+rust-version = "1.99"
 
 # 共享依赖：各 crate 通过 `workspace = true` 引用，保证版本唯一。
 [workspace.dependencies]
