@@ -281,13 +281,13 @@ impl Compositor {
         for (i, f) in scene.fences.iter().enumerate() {
             if f.blur {
                 self.sync_blur(i, f);
-            } else if let Some(bv) = self.blurs[i].take() {
+            } else { match self.blurs[i].take() { Some(bv) => {
                 if let Ok(children) = self.root.Children() {
                     if let Err(e) = children.Remove(&bv.visual) {
                         tracing::warn!(?e, i, "移除模糊视觉失败");
                     }
                 }
-            }
+            } _ => {}}}
         }
         // 回收尾部多余视觉（栅栏数量减少时）
         while self.blurs.len() > scene.fences.len() {

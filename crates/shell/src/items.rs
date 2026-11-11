@@ -92,11 +92,11 @@ pub fn enumerate_desktop_items() -> windows::core::Result<Vec<DesktopItem>> {
         let pidl = slot[0];
         slot[0] = std::ptr::null_mut();
 
-        if let Some(item) = build_item(&desktop, pidl) {
+        match build_item(&desktop, pidl) { Some(item) => {
             items.push(item);
-        } else {
+        } _ => {
             unsafe { CoTaskMemFree(Some(pidl as *const _)) };
-        }
+        }}
     }
     Ok(items)
 }

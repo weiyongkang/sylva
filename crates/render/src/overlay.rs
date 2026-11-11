@@ -719,9 +719,9 @@ unsafe extern "system" fn proxy_proc(
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-) -> LRESULT {
+) -> LRESULT { unsafe {
     DefWindowProcW(hwnd, msg, wparam, lparam)
-}
+}}
 
 /// 把命中模型的栅栏矩形并集设为窗口区域。区域外：
 /// - 点击/命中直接落到下方窗口（点击穿透的关键）；

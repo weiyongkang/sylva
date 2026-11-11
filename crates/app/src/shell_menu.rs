@@ -483,7 +483,7 @@ unsafe extern "system" fn menu_host_proc(
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-) -> LRESULT {
+) -> LRESULT { unsafe {
     match msg {
         WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM => {
             let handled = MENU_CTX2.with(|c| {
@@ -531,7 +531,7 @@ unsafe extern "system" fn menu_host_proc(
         _ => {}
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
-}
+}}
 
 /// 把字符串转成 UTF-16（含结尾 NUL），供宽字符 API 使用。
 fn wide(s: &str) -> Vec<u16> {

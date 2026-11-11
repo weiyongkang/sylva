@@ -600,7 +600,7 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
 }
 
 /// Ctrl+C / 关闭终端：通知主循环退出（信号线程不做窗口访问）。
-unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
+unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL { unsafe {
     if let Some(hwnd) = OVERLAY_HWND.get() {
         let _ = PostMessageW(
             Some(HWND(*hwnd as *mut core::ffi::c_void)),
@@ -610,7 +610,7 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
         );
     }
     BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
-}
+}}
 
 /// 栅栏用于碰撞/夹屏的真实矩形：自动高度（`bounds.h <= 0`）时用最近一次布局
 /// 渲染高度。视觉矩形 = 模型矩形（拖拽已无补间），碰撞检测与实际可见区域一致。

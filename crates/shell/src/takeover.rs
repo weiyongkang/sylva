@@ -146,7 +146,7 @@ fn find_class_descendant(hwnd: HWND, class_name: &str) -> Option<HWND> {
     ctx.found
 }
 
-unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL { unsafe {
     let ctx = &mut *(lparam.0 as *mut FindCtx);
     if ctx.found.is_some() {
         return BOOL(0); // 已找到，停止
@@ -157,7 +157,7 @@ unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     } else {
         BOOL(1) // 继续枚举
     }
-}
+}}
 
 /// 读取窗口类名。
 fn class_of(hwnd: HWND) -> Option<String> {
