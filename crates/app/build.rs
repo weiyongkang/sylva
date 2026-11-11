@@ -16,7 +16,7 @@ fn main() {
         .join("..")
         .join("assets")
         .join("sylva.ico");
-    let mut res = winres::WindowsResource::new();
+    let mut res = winresource::WindowsResource::new();
     // 路径交给 rc.exe 时按字面使用：直接给绝对路径，避免 cwd 歧义
     res.set_icon(&icon.to_string_lossy());
     res.set_manifest(MANIFEST);

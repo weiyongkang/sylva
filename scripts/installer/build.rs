@@ -15,7 +15,7 @@ fn main() {
         .join("..")
         .join("assets")
         .join("sylva.ico");
-    let mut res = winres::WindowsResource::new();
+    let mut res = winresource::WindowsResource::new();
     res.set_icon(&icon.to_string_lossy());
     res.set("ProductName", "Sylva 桌面栅栏整理器");
     res.set("FileDescription", "Sylva 安装程序");
