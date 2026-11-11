@@ -30,44 +30,43 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use windows::core::{w, BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, CreateSolidBrush, DeleteObject, RedrawWindow, SetBkColor, SetTextColor,
-    FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, HBRUSH, HDC, HFONT,
-    LOGFONTW, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
+    CreateFontIndirectW, CreateSolidBrush, DeleteObject, FONT_CHARSET, FONT_CLIP_PRECISION,
+    FONT_OUTPUT_PRECISION, FONT_QUALITY, HBRUSH, HDC, HFONT, LOGFONTW, RDW_ALLCHILDREN,
+    RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, SetBkColor, SetTextColor,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, IBindCtx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IBindCtx,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     EM_SETREADONLY, PBM_SETBARCOLOR, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
 };
 use windows::Win32::UI::HiDpi::{
-    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
+    SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FORCEFILESYSTEM,
-    FOS_PICKFOLDERS, SIGDN_FILESYSPATH, FOLDERID_Desktop, SHGetKnownFolderPath,
-    KNOWN_FOLDER_FLAG,
+    FOLDERID_Desktop, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
+    IShellItem, KNOWN_FOLDER_FLAG, SHCreateItemFromParsingName, SHGetKnownFolderPath,
+    SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, EnumChildWindows,
-    FindWindowExW, FindWindowW, GetClassNameW, GetClientRect, GetMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, IsDialogMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage,
-    RegisterClassW,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CS_HREDRAW,
-    CS_VREDRAW, ES_AUTOHSCROLL, GWLP_USERDATA, HICON, HMENU, ICON_BIG,
-    ICON_SMALL, IDC_STATIC, IMAGE_ICON, LR_DEFAULTCOLOR, MESSAGEBOX_STYLE, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, STM_SETICON, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_GETTEXT, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW,
+    ES_AUTOHSCROLL, EnumChildWindows, FindWindowExW, FindWindowW, GWLP_USERDATA, GetClassNameW,
+    GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON, HMENU, ICON_BIG,
+    ICON_SMALL, IDC_STATIC, IMAGE_ICON, IsDialogMessageW, LR_DEFAULTCOLOR, LoadIconW, LoadImageW,
+    MESSAGEBOX_STYLE, MSG, MessageBoxW, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
+    STM_SETICON, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_GETTEXT, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_CAPTION, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 /// 内嵌主程序（编译期打包，安装器独立分发）。
 const SYLVA_EXE: &[u8] = include_bytes!("../../../target/release/sylva.exe");
@@ -94,8 +93,6 @@ const ACCENT: COLORREF = COLORREF(0x00_3B_82_F6); // RGB(59,130,246) 进度条�
 
 /// 子进程不弹出控制台窗口（CREATE_NO_WINDOW）
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-
 
 /// 触发桌面 WorkerW 生成的私有消息（与壳层 takeover.rs 相同的 Progman 技巧）。
 const WM_SPAWN_WORKERW: u32 = 0x052C;
@@ -257,7 +254,10 @@ fn reg_del(key: &str, value: Option<&str>) {
         args.push("/v");
         args.push(v);
     }
-    let _ = Command::new("reg").args(&args).creation_flags(CREATE_NO_WINDOW).status();
+    let _ = Command::new("reg")
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
 
 /// 用 Shell API 获取用户桌面文件夹的真实路径（支持自定义桌面位置）。
@@ -287,7 +287,9 @@ fn default_path() -> String {
 /// （主程序、卸载器、data 数据目录）都放进这个 `sylva` 文件夹。
 fn normalize_dest(p: &str) -> PathBuf {
     let pb = PathBuf::from(p);
-    let last = pb.file_name().map(|s| s.to_string_lossy().to_ascii_lowercase());
+    let last = pb
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase());
     if last.as_deref() == Some("sylva") {
         pb
     } else {
@@ -507,12 +509,11 @@ fn sylva_running() -> bool {
 /// 定位安装目录：优先取本程序所在目录（卸载器与主程序同目录），
 /// 兜底读注册表 `InstallLocation`。
 fn detect_install_dir() -> Option<PathBuf> {
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if dir.join("sylva.exe").is_file() {
-                return Some(dir.to_path_buf());
-            }
-        }
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+        && dir.join("sylva.exe").is_file()
+    {
+        return Some(dir.to_path_buf());
     }
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sylva";
     let out = Command::new("reg")
@@ -537,20 +538,22 @@ struct FindCtx {
 }
 
 unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &mut *(lparam.0 as *mut FindCtx);
-    if ctx.found.is_some() {
-        return BOOL(0); // 已找到，停止
-    }
-    let mut buf = [0u16; 256];
-    let n = GetClassNameW(hwnd, &mut buf);
-    if n > 0 {
-        let cls = String::from_utf16_lossy(&buf[..n as usize]);
-        if cls == ctx.class_name {
-            ctx.found = Some(hwnd);
-            return BOOL(0);
+    unsafe {
+        let ctx = &mut *(lparam.0 as *mut FindCtx);
+        if ctx.found.is_some() {
+            return BOOL(0); // 已找到，停止
         }
+        let mut buf = [0u16; 256];
+        let n = GetClassNameW(hwnd, &mut buf);
+        if n > 0 {
+            let cls = String::from_utf16_lossy(&buf[..n as usize]);
+            if cls == ctx.class_name {
+                ctx.found = Some(hwnd);
+                return BOOL(0);
+            }
+        }
+        BOOL(1)
     }
-    BOOL(1)
 }
 
 /// 在 `hwnd` 子树中递归查找第一个指定类名的窗口。
@@ -572,10 +575,10 @@ fn find_class_descendant(hwnd: HWND, class_name: &str) -> Option<HWND> {
 /// 定位 `SHELLDLL_DefView`：先试顶层，再递归 Progman 子树
 /// （Wallpaper Engine 会把 DefView 重挂到它新建的 WorkerW 下）。
 fn find_def_view() -> Option<HWND> {
-    if let Ok(top) = unsafe { FindWindowW(PCWSTR(wide(CLASS_DEFVIEW).as_ptr()), None) } {
-        if !top.is_invalid() {
-            return Some(top);
-        }
+    if let Ok(top) = unsafe { FindWindowW(PCWSTR(wide(CLASS_DEFVIEW).as_ptr()), None) }
+        && !top.is_invalid()
+    {
+        return Some(top);
     }
     let progman = unsafe { FindWindowW(PCWSTR(wide(CLASS_PROGMAN).as_ptr()), None) }
         .ok()
@@ -587,17 +590,17 @@ fn find_def_view() -> Option<HWND> {
 /// `SysListView32` 显示回来，杜绝「桌面空白」。
 fn restore_desktop_icons() {
     unsafe {
-        if let Ok(progman) = FindWindowW(PCWSTR(wide(CLASS_PROGMAN).as_ptr()), None) {
-            if !progman.is_invalid() {
-                let _ = SendMessageW(progman, WM_SPAWN_WORKERW, None, None);
-            }
+        if let Ok(progman) = FindWindowW(PCWSTR(wide(CLASS_PROGMAN).as_ptr()), None)
+            && !progman.is_invalid()
+        {
+            let _ = SendMessageW(progman, WM_SPAWN_WORKERW, None, None);
         }
-        if let Some(dv) = find_def_view() {
-            if let Ok(lv) = FindWindowExW(Some(dv), None, PCWSTR(wide(CLASS_LISTVIEW).as_ptr()), None) {
-                if !lv.is_invalid() {
-                    let _ = ShowWindow(lv, SW_SHOW);
-                }
-            }
+        if let Some(dv) = find_def_view()
+            && let Ok(lv) =
+                FindWindowExW(Some(dv), None, PCWSTR(wide(CLASS_LISTVIEW).as_ptr()), None)
+            && !lv.is_invalid()
+        {
+            let _ = ShowWindow(lv, SW_SHOW);
         }
     }
 }
@@ -665,23 +668,23 @@ fn run_uninstall(app: &mut Installer) -> bool {
     // 6. 删除安装目录内容：运行中的自身 uninstall.exe 除外（Windows 不允许删除
     //    运行中的 exe，交给延迟清理进程在退出后删除），其余全部删掉。
     set_status(app, "正在删除安装文件…");
-    if let Some(d) = &dest {
-        if let Ok(entries) = fs::read_dir(d) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.file_name()
-                    .map(|n| n.to_string_lossy().to_ascii_lowercase() == "uninstall.exe")
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let r = if p.is_dir() {
-                    fs::remove_dir_all(&p)
-                } else {
-                    fs::remove_file(&p)
-                };
-                let _ = r; // 失败项由延迟清理整目录删除兜底
+    if let Some(d) = &dest
+        && let Ok(entries) = fs::read_dir(d)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase() == "uninstall.exe")
+                .unwrap_or(false)
+            {
+                continue;
             }
+            let r = if p.is_dir() {
+                fs::remove_dir_all(&p)
+            } else {
+                fs::remove_file(&p)
+            };
+            let _ = r; // 失败项由延迟清理整目录删除兜底
         }
     }
 
@@ -782,7 +785,9 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 unsafe fn place(h: HWND, x: i32, y: i32, w: i32, hh: i32) {
-    let _ = SetWindowPos(h, None, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+    unsafe {
+        let _ = SetWindowPos(h, None, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 /// 按当前 DPI 重排全部子控件并应用字体。DPI 变化时同时重建字体。
@@ -922,110 +927,112 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let app_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    match msg {
-        WM_COMMAND => {
-            let mut to_destroy = None;
-            if app_ptr != 0 {
-                let app = &mut *(app_ptr as *mut Installer);
-                let id = wparam.0 & 0xFFFF;
-                let code = wparam.0 >> 16;
-                if code == BN_CLICKED as usize {
-                    match (app.mode, id) {
-                        (Mode::Install, ID_BTN_INSTALL) if !app.busy => {
-                            let ok = run_install(app);
-                            if ok {
-                                to_destroy = Some(app.hwnd);
+    unsafe {
+        let app_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        match msg {
+            WM_COMMAND => {
+                let mut to_destroy = None;
+                if app_ptr != 0 {
+                    let app = &mut *(app_ptr as *mut Installer);
+                    let id = wparam.0 & 0xFFFF;
+                    let code = wparam.0 >> 16;
+                    if code == BN_CLICKED as usize {
+                        match (app.mode, id) {
+                            (Mode::Install, ID_BTN_INSTALL) if !app.busy => {
+                                let ok = run_install(app);
+                                if ok {
+                                    to_destroy = Some(app.hwnd);
+                                }
                             }
-                        }
-                        (Mode::Uninstall, ID_BTN_INSTALL) if !app.busy => {
-                            let ok = run_uninstall(app);
-                            if ok {
-                                to_destroy = Some(app.hwnd);
+                            (Mode::Uninstall, ID_BTN_INSTALL) if !app.busy => {
+                                let ok = run_uninstall(app);
+                                if ok {
+                                    to_destroy = Some(app.hwnd);
+                                }
                             }
-                        }
-                        (Mode::Install, ID_BTN_BROWSE) if !app.busy => {
-                            let cur = get_path(app);
-                            if let Some(p) = pick_folder(hwnd, &cur) {
-                                // 规范化：选 `D:\Program Files` 补成 `D:\Program Files\sylva`
-                                let norm = normalize_dest(&p);
-                                set_path(app, &norm.to_string_lossy());
+                            (Mode::Install, ID_BTN_BROWSE) if !app.busy => {
+                                let cur = get_path(app);
+                                if let Some(p) = pick_folder(hwnd, &cur) {
+                                    // 规范化：选 `D:\Program Files` 补成 `D:\Program Files\sylva`
+                                    let norm = normalize_dest(&p);
+                                    set_path(app, &norm.to_string_lossy());
+                                }
                             }
+                            (_, ID_BTN_CANCEL) if !app.busy => {
+                                to_destroy = Some(hwnd);
+                            }
+                            _ => {}
                         }
-                        (_, ID_BTN_CANCEL) if !app.busy => {
-                            to_destroy = Some(hwnd);
-                        }
-                        _ => {}
                     }
                 }
-            }
-            if let Some(h) = to_destroy {
-                let _ = DestroyWindow(h);
-            }
-            LRESULT(0)
-        }
-        // wParam=HDC，lParam=控件 hwnd（注意别接反）
-        WM_CTLCOLORSTATIC => {
-            if app_ptr != 0 {
-                let app = &*(app_ptr as *const Installer);
-                let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
-                let ctl = HWND(lparam.0 as *mut core::ffi::c_void);
-                let fg = if ctl == app.hsub || ctl == app.hhint || ctl == app.hstatus {
-                    TEXT_MUTED
-                } else {
-                    TEXT_FG
-                };
-                let _ = SetTextColor(hdc, fg);
-                let _ = SetBkColor(hdc, PANEL_BG);
-                return LRESULT(app.brush.0 as isize);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
-            if app_ptr != 0 {
-                let app = &*(app_ptr as *const Installer);
-                let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
-                let _ = SetTextColor(hdc, TEXT_FG);
-                let _ = SetBkColor(hdc, PANEL_BG);
-                return LRESULT(app.brush.0 as isize);
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        // 跨显示器/改缩放：按系统建议矩形调整窗口，重排子控件
-        WM_DPICHANGED => {
-            let dpi = (wparam.0 >> 16) as u32;
-            let rc = &*(lparam.0 as *const RECT);
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                rc.left,
-                rc.top,
-                rc.right - rc.left,
-                rc.bottom - rc.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-            if app_ptr != 0 {
-                let app = &mut *(app_ptr as *mut Installer);
-                relayout(app, dpi);
-            }
-            LRESULT(0)
-        }
-        WM_PAINT => DefWindowProcW(hwnd, msg, wparam, lparam),
-        WM_DESTROY => {
-            if app_ptr != 0 {
-                let app = Box::from_raw(app_ptr as *mut Installer);
-                let _ = DeleteObject(app.brush.into());
-                let _ = DeleteObject(app.font_title.into());
-                let _ = DeleteObject(app.font_section.into());
-                let _ = DeleteObject(app.font_ui.into());
-                if !app.hicon.is_invalid() {
-                    let _ = DestroyIcon(app.hicon);
+                if let Some(h) = to_destroy {
+                    let _ = DestroyWindow(h);
                 }
+                LRESULT(0)
             }
-            PostQuitMessage(0);
-            LRESULT(0)
+            // wParam=HDC，lParam=控件 hwnd（注意别接反）
+            WM_CTLCOLORSTATIC => {
+                if app_ptr != 0 {
+                    let app = &*(app_ptr as *const Installer);
+                    let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+                    let ctl = HWND(lparam.0 as *mut core::ffi::c_void);
+                    let fg = if ctl == app.hsub || ctl == app.hhint || ctl == app.hstatus {
+                        TEXT_MUTED
+                    } else {
+                        TEXT_FG
+                    };
+                    let _ = SetTextColor(hdc, fg);
+                    let _ = SetBkColor(hdc, PANEL_BG);
+                    return LRESULT(app.brush.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
+                if app_ptr != 0 {
+                    let app = &*(app_ptr as *const Installer);
+                    let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+                    let _ = SetTextColor(hdc, TEXT_FG);
+                    let _ = SetBkColor(hdc, PANEL_BG);
+                    return LRESULT(app.brush.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            // 跨显示器/改缩放：按系统建议矩形调整窗口，重排子控件
+            WM_DPICHANGED => {
+                let dpi = (wparam.0 >> 16) as u32;
+                let rc = &*(lparam.0 as *const RECT);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    rc.left,
+                    rc.top,
+                    rc.right - rc.left,
+                    rc.bottom - rc.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                if app_ptr != 0 {
+                    let app = &mut *(app_ptr as *mut Installer);
+                    relayout(app, dpi);
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => DefWindowProcW(hwnd, msg, wparam, lparam),
+            WM_DESTROY => {
+                if app_ptr != 0 {
+                    let app = Box::from_raw(app_ptr as *mut Installer);
+                    let _ = DeleteObject(app.brush.into());
+                    let _ = DeleteObject(app.font_title.into());
+                    let _ = DeleteObject(app.font_section.into());
+                    let _ = DeleteObject(app.font_ui.into());
+                    if !app.hicon.is_invalid() {
+                        let _ = DestroyIcon(app.hicon);
+                    }
+                }
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
@@ -1296,12 +1303,7 @@ fn main() {
         set_path(&app, &dir);
         let _ = unsafe { ShowWindow(app.hbtn_browse, SW_HIDE) };
         unsafe {
-            let _ = SendMessageW(
-                app.hpath,
-                EM_SETREADONLY,
-                Some(WPARAM(1)),
-                Some(LPARAM(0)),
-            );
+            let _ = SendMessageW(app.hpath, EM_SETREADONLY, Some(WPARAM(1)), Some(LPARAM(0)));
         }
     }
     unsafe {
