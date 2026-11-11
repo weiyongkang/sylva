@@ -32,14 +32,14 @@ pub mod theme;
 
 pub use compositor::Compositor;
 pub use device::RenderDevice;
-pub use draw::{draw_scene, IconStore, TextFormats};
+pub use draw::{IconStore, TextFormats, draw_scene};
 pub use overlay::{
-    run_message_loop, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit, OverlayEvent,
-    OverlayWindow, RectF, ResizeZone, GRIP_SIZE, WM_APP_QUIT, WM_SYLVA_INJECT,
+    ConsoleHit, ConsoleZone, FenceHit, GRIP_SIZE, HitModel, IconHit, OverlayEvent, OverlayWindow,
+    RectF, ResizeZone, WM_APP_QUIT, WM_SYLVA_INJECT, run_message_loop,
 };
 pub use scene::{
     ListColumns, Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow,
     SceneIcon,
 };
 pub use surface::{CompositionSurface, Frame};
-pub use theme::{Theme, GRID_CAPTION_H_MULT};
+pub use theme::{GRID_CAPTION_H_MULT, Theme};

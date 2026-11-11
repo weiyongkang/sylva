@@ -3,7 +3,7 @@
 use crate::*;
 use sylva_render::scene::ReorderDrag;
 pub(crate) fn system_dark_mode() -> bool {
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
     let value = wide("AppsUseLightTheme");
     let mut data: u32 = 1;
@@ -52,8 +52,8 @@ pub(crate) fn label_width(text: &str, font_size: f32) -> f32 {
 /// 用 Shell API 获取用户桌面文件夹的真实路径。
 /// 支持用户自定义桌面位置（如移到 D 盘），比 `USERPROFILE\Desktop` 可靠。
 fn shell_desktop_path() -> Option<String> {
-    use windows::Win32::UI::Shell::{FOLDERID_Desktop, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG};
     use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Desktop, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
     unsafe {
         let pwstr = SHGetKnownFolderPath(&FOLDERID_Desktop, KNOWN_FOLDER_FLAG(0), None).ok()?;
         let path = pwstr.to_string().ok()?;
@@ -108,49 +108,55 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
     let alpha = fence_alpha(rt, now);
     let mut scene = Scene::new(rt.vw, rt.vh);
     // 拖动排序：用当前帧的实际渲染位置重排图标（后处理，避免坐标系问题）
-    if let Some((fence_idx, icon_idx, mx, my)) = rt.sidebar_reorder {
-        if let Some(sf) = scene.fences.get_mut(fence_idx) {
-            let n = sf.icons.len();
-            if n > 1 && icon_idx < n {
-                let is_vert = rt.desk.fences[fence_idx].appearance.sidebar_pos != SidebarPosition::Top;
-                // 找光标最接近的非拖动图标
-                let mut insert_at = n - 1;
-                let mut best_dist = f32::MAX;
-                for (k, ic) in sf.icons.iter().enumerate() {
-                    if k == icon_idx { continue; }
-                    let cx = ic.x + ic.size / 2.0;
-                    let cy = ic.y + ic.size / 2.0;
-                    let (dist, cursor, center) = if is_vert {
-                        ((my - cy).abs(), my, cy)
-                    } else {
-                        ((mx - cx).abs(), mx, cx)
-                    };
-                    if dist < best_dist {
-                        best_dist = dist;
-                        insert_at = if cursor < center { k } else { k + 1 };
-                    }
+    if let Some((fence_idx, icon_idx, mx, my)) = rt.sidebar_reorder
+        && let Some(sf) = scene.fences.get_mut(fence_idx)
+    {
+        let n = sf.icons.len();
+        if n > 1 && icon_idx < n {
+            let is_vert = rt.desk.fences[fence_idx].appearance.sidebar_pos != SidebarPosition::Top;
+            // 找光标最接近的非拖动图标
+            let mut insert_at = n - 1;
+            let mut best_dist = f32::MAX;
+            for (k, ic) in sf.icons.iter().enumerate() {
+                if k == icon_idx {
+                    continue;
                 }
-                let insert_at = insert_at.min(n - 1);
-                // 重排图标向量
-                let dragged = sf.icons.remove(icon_idx);
-                let adj_insert = if insert_at > icon_idx { insert_at - 1 } else { insert_at };
-                sf.icons.insert(adj_insert, dragged);
-                // 更新 icon_ids 顺序（与 icons 向量同步）
-                if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
-                    let id = f.icon_ids.remove(icon_idx);
-                    f.icon_ids.insert(adj_insert, id);
+                let cx = ic.x + ic.size / 2.0;
+                let cy = ic.y + ic.size / 2.0;
+                let (dist, cursor, center) = if is_vert {
+                    ((my - cy).abs(), my, cy)
+                } else {
+                    ((mx - cx).abs(), mx, cx)
+                };
+                if dist < best_dist {
+                    best_dist = dist;
+                    insert_at = if cursor < center { k } else { k + 1 };
                 }
-                // 被拖图标跟随光标
-                if let Some(ic) = sf.icons.get_mut(adj_insert) {
-                    ic.x = if is_vert { ic.x } else { mx - ic.size / 2.0 };
-                    ic.y = if is_vert { my - ic.size / 2.0 } else { ic.y };
-                }
-                sf.reorder_drag = Some(ReorderDrag {
-                    icon_idx: adj_insert,
-                    cursor_x: mx,
-                    cursor_y: my,
-                });
             }
+            let insert_at = insert_at.min(n - 1);
+            // 重排图标向量
+            let dragged = sf.icons.remove(icon_idx);
+            let adj_insert = if insert_at > icon_idx {
+                insert_at - 1
+            } else {
+                insert_at
+            };
+            sf.icons.insert(adj_insert, dragged);
+            // 更新 icon_ids 顺序（与 icons 向量同步）
+            if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
+                let id = f.icon_ids.remove(icon_idx);
+                f.icon_ids.insert(adj_insert, id);
+            }
+            // 被拖图标跟随光标
+            if let Some(ic) = sf.icons.get_mut(adj_insert) {
+                ic.x = if is_vert { ic.x } else { mx - ic.size / 2.0 };
+                ic.y = if is_vert { my - ic.size / 2.0 } else { ic.y };
+            }
+            sf.reorder_drag = Some(ReorderDrag {
+                icon_idx: adj_insert,
+                cursor_x: mx,
+                cursor_y: my,
+            });
         }
     }
     for i in 0..rt.desk.fences.len() {
@@ -197,14 +203,12 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
         sf.alpha = alpha;
         // 悬停放大：普通布局（网格/列表）在循环内做；侧边栏 Dock 放大
         // 依赖全部栅栏的真实几何，放到循环结束后统一处理（见 build_dock_magnify）。
-        if f.appearance.layout != FenceLayout::Sidebar {
-            if let Some((hf, hi)) = rt.hover {
-                if hf == i {
-                    if let Some(ic) = sf.icons.get_mut(hi) {
-                        ic.scale = icon_hover_scale(rt, hf, hi, now);
-                    }
-                }
-            }
+        if f.appearance.layout != FenceLayout::Sidebar
+            && let Some((hf, hi)) = rt.hover
+            && hf == i
+            && let Some(ic) = sf.icons.get_mut(hi)
+        {
+            ic.scale = icon_hover_scale(rt, hf, hi, now);
         }
         // 回写钳制后的滚动偏移（滚轮事件在 layout 内被限制在 [0, max_scroll]）
         rt.desk.fences[i].scroll = sf.scroll;
@@ -260,7 +264,10 @@ pub(crate) fn console_full_height(desk: &Desk, s: f32) -> f32 {
 
 /// 详情区可见行的总高度（行高 30px × 可见行数 + 标签行 24px）。
 fn detail_visible_rows(desk: &Desk, s: f32) -> f32 {
-    let app = desk.fences.iter().find(|f| !f.icon_ids.is_empty() || desk.fences.len() == 1);
+    let app = desk
+        .fences
+        .iter()
+        .find(|f| !f.icon_ids.is_empty() || desk.fences.len() == 1);
     let (layout, style) = app
         .map(|f| (f.appearance.layout, f.appearance.bg_style))
         .unwrap_or((FenceLayout::Grid, FenceStyle::Glass));
@@ -305,10 +312,7 @@ pub(crate) fn console_geometry(desk: &Desk, theme: &Theme, vw: f32, vh: f32, pan
     let h = full_h * panel.clamp(0.0, 1.12);
     let (x, y) = match desk.console_pos {
         Some(p) => (p.x, p.y),
-        None => (
-            (vw - w - margin).max(8.0 * s),
-            margin.max(8.0 * s),
-        ),
+        None => ((vw - w - margin).max(8.0 * s), margin.max(8.0 * s)),
     };
     RectF { x, y, w, h }
 }
@@ -400,9 +404,24 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         let show_size = app.layout != FenceLayout::List;
         let (size_s, size_m, size_l) = if show_size {
             let sy = row_y(row);
-            let s_s = RectF { x: d.x + label_w, y: sy, w: 40.0 * s, h: btn_h };
-            let s_m = RectF { x: s_s.x + s_s.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
-            let s_l = RectF { x: s_m.x + s_m.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
+            let s_s = RectF {
+                x: d.x + label_w,
+                y: sy,
+                w: 40.0 * s,
+                h: btn_h,
+            };
+            let s_m = RectF {
+                x: s_s.x + s_s.w + 6.0 * s,
+                y: sy,
+                w: 40.0 * s,
+                h: btn_h,
+            };
+            let s_l = RectF {
+                x: s_m.x + s_m.w + 6.0 * s,
+                y: sy,
+                w: 40.0 * s,
+                h: btn_h,
+            };
             row += 1;
             (s_s, s_m, s_l)
         } else {
@@ -440,11 +459,21 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
             let sw = 18.0 * s;
             let gap = 6.0 * s;
             let tint_y = row_y(row) + (btn_h - sw) / 2.0;
-            let td = RectF { x: d.x + label_w, y: tint_y, w: sw, h: sw };
+            let td = RectF {
+                x: d.x + label_w,
+                y: tint_y,
+                w: sw,
+                h: sw,
+            };
             let mut ts = Vec::with_capacity(TINT_PRESETS.len());
             let mut x = td.x + sw + gap;
             for _ in TINT_PRESETS {
-                ts.push(RectF { x, y: tint_y, w: sw, h: sw });
+                ts.push(RectF {
+                    x,
+                    y: tint_y,
+                    w: sw,
+                    h: sw,
+                });
                 x += sw + gap;
             }
             row += 1;
@@ -464,9 +493,24 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         let show_sidebar_pos = app.layout == FenceLayout::Sidebar;
         let (sidebar_left, sidebar_top, sidebar_right) = if show_sidebar_pos {
             let sy = row_y(row);
-            let sl = RectF { x: d.x + label_w, y: sy, w: 40.0 * s, h: btn_h };
-            let st = RectF { x: sl.x + sl.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
-            let sr = RectF { x: st.x + st.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
+            let sl = RectF {
+                x: d.x + label_w,
+                y: sy,
+                w: 40.0 * s,
+                h: btn_h,
+            };
+            let st = RectF {
+                x: sl.x + sl.w + 6.0 * s,
+                y: sy,
+                w: 40.0 * s,
+                h: btn_h,
+            };
+            let sr = RectF {
+                x: st.x + st.w + 6.0 * s,
+                y: sy,
+                w: 40.0 * s,
+                h: btn_h,
+            };
             (sl, st, sr)
         } else {
             (RectF::default(), RectF::default(), RectF::default())
@@ -633,8 +677,8 @@ pub(crate) fn layout_fence(
         .filter(|&(fi, _)| fi == fence_idx)
         .map(|(_, r)| r);
 
-    let (icons, scroll, scroll_max, scroll_view, list_cols, grid_cell_w, height) =
-        match app.layout {
+    let (icons, scroll, scroll_max, scroll_view, list_cols, grid_cell_w, height) = match app.layout
+    {
         FenceLayout::Grid => {
             let icon_size = app.icon_size * scale;
             let gap = app.gap * scale;
@@ -1142,30 +1186,30 @@ pub(crate) fn build_dock_magnify(rt: &mut Runtime, scene_fences: &mut [SceneFenc
         // 拖动排序期间抑制工具提示（避免反复出现/消失导致 surface 重建闪烁）
         if let Some(hi) = hovered {
             rt.hover = Some((i, hi));
-            if rt.sidebar_reorder.is_none() {
-                if let Some(icon) = sf.icons.get(hi) {
-                    let geom = SidebarGeom {
-                        vw: rt.vw,
-                        vh: rt.vh,
-                        font_size: rt.theme.label.size,
-                        scale: rt.theme.scale,
-                        pos: rt.desk.fences[i].appearance.sidebar_pos,
-                    };
-                    sf.tooltip_rect = Some(sidebar_tooltip_rect(&geom, icon, &icon.label));
-                }
+            if rt.sidebar_reorder.is_none()
+                && let Some(icon) = sf.icons.get(hi)
+            {
+                let geom = SidebarGeom {
+                    vw: rt.vw,
+                    vh: rt.vh,
+                    font_size: rt.theme.label.size,
+                    scale: rt.theme.scale,
+                    pos: rt.desk.fences[i].appearance.sidebar_pos,
+                };
+                sf.tooltip_rect = Some(sidebar_tooltip_rect(&geom, icon, &icon.label));
             }
         } else {
             sf.tooltip_rect = None;
         }
         // 侧边栏拖动排序状态传递给场景
-        if let Some((fence_idx, icon_idx, cursor_x, cursor_y)) = rt.sidebar_reorder {
-            if fence_idx == i {
-                sf.reorder_drag = Some(ReorderDrag {
-                    icon_idx,
-                    cursor_x,
-                    cursor_y,
-                });
-            }
+        if let Some((fence_idx, icon_idx, cursor_x, cursor_y)) = rt.sidebar_reorder
+            && fence_idx == i
+        {
+            sf.reorder_drag = Some(ReorderDrag {
+                icon_idx,
+                cursor_x,
+                cursor_y,
+            });
         }
     }
 }

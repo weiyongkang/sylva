@@ -23,22 +23,22 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::{Mutex, OnceLock};
 
-use windows::core::{Interface, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::IBindCtx;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    BHID_SFUIObject, IContextMenu, IContextMenu2, IContextMenu3, IShellItem,
-    SHCreateItemFromParsingName, CMF_NORMAL, CMINVOKECOMMANDINFO,
+    BHID_SFUIObject, CMF_NORMAL, CMINVOKECOMMANDINFO, IContextMenu, IContextMenu2, IContextMenu3,
+    IShellItem, SHCreateItemFromParsingName,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-    GetMessageW, InsertMenuW, PostMessageW, PostQuitMessage, RegisterClassW, TrackPopupMenu,
-    TranslateMessage, HWND_MESSAGE, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
-    WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WM_NULL, WNDCLASSW,
-    WNDCLASS_STYLES, WS_POPUP,
+    GetMessageW, HWND_MESSAGE, InsertMenuW, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, MSG,
+    PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_DRAWITEM, WM_INITMENUPOPUP,
+    WM_MEASUREITEM, WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WM_NULL,
+    WNDCLASS_STYLES, WNDCLASSW, WS_POPUP,
 };
+use windows::core::{Interface, PCSTR, PCWSTR};
 
 /// Shell 项命令 ID 区间（`QueryContextMenu` 的 idCmdFirst..=idCmdLast）。
 const SHELL_CMD_FIRST: u32 = 0x7000;
@@ -166,11 +166,7 @@ fn prime_path_async(path: &str, hwnd: HWND) -> Option<std::sync::mpsc::Receiver<
             }
         })
         .is_ok();
-    if ok {
-        Some(rx)
-    } else {
-        None
-    }
+    if ok { Some(rx) } else { None }
 }
 
 /// 加载并初始化 `path` 文件类型的 Shell 扩展（创建 IContextMenu + QueryContextMenu，
@@ -483,39 +479,10 @@ unsafe extern "system" fn menu_host_proc(
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-) -> LRESULT { unsafe {
-    match msg {
-        WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM => {
-            let handled = MENU_CTX2.with(|c| {
-                if let Some(ctx) = c.borrow().as_ref() {
-                    ctx.HandleMenuMsg(msg, wparam, lparam).is_ok()
-                } else {
-                    false
-                }
-            });
-            if handled {
-                return LRESULT(0);
-            }
-        }
-        WM_MENUCHAR | WM_MENUDRAG | WM_MENUCOMMAND | WM_MENURBUTTONUP => {
-            // IContextMenu3 能返回 lResult（WM_MENUCHAR 需要）
-            let r = MENU_CTX3.with(|c| {
-                if let Some(ctx) = c.borrow().as_ref() {
-                    let mut lr = LRESULT(0);
-                    if ctx
-                        .HandleMenuMsg2(msg, wparam, lparam, Some(&mut lr))
-                        .is_ok()
-                    {
-                        return Some(lr);
-                    }
-                }
-                None
-            });
-            if let Some(lr) = r {
-                return lr;
-            }
-            // 只有 v2 时，WM_MENUCHAR 交给 HandleMenuMsg（返回值不可达，仅尽力）
-            if msg == WM_MENUCHAR {
+) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM => {
                 let handled = MENU_CTX2.with(|c| {
                     if let Some(ctx) = c.borrow().as_ref() {
                         ctx.HandleMenuMsg(msg, wparam, lparam).is_ok()
@@ -527,11 +494,42 @@ unsafe extern "system" fn menu_host_proc(
                     return LRESULT(0);
                 }
             }
+            WM_MENUCHAR | WM_MENUDRAG | WM_MENUCOMMAND | WM_MENURBUTTONUP => {
+                // IContextMenu3 能返回 lResult（WM_MENUCHAR 需要）
+                let r = MENU_CTX3.with(|c| {
+                    if let Some(ctx) = c.borrow().as_ref() {
+                        let mut lr = LRESULT(0);
+                        if ctx
+                            .HandleMenuMsg2(msg, wparam, lparam, Some(&mut lr))
+                            .is_ok()
+                        {
+                            return Some(lr);
+                        }
+                    }
+                    None
+                });
+                if let Some(lr) = r {
+                    return lr;
+                }
+                // 只有 v2 时，WM_MENUCHAR 交给 HandleMenuMsg（返回值不可达，仅尽力）
+                if msg == WM_MENUCHAR {
+                    let handled = MENU_CTX2.with(|c| {
+                        if let Some(ctx) = c.borrow().as_ref() {
+                            ctx.HandleMenuMsg(msg, wparam, lparam).is_ok()
+                        } else {
+                            false
+                        }
+                    });
+                    if handled {
+                        return LRESULT(0);
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => {}
+        DefWindowProcW(hwnd, msg, wparam, lparam)
     }
-    DefWindowProcW(hwnd, msg, wparam, lparam)
-}}
+}
 
 /// 把字符串转成 UTF-16（含结尾 NUL），供宽字符 API 使用。
 fn wide(s: &str) -> Vec<u16> {

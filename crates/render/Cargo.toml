@@ -2,6 +2,7 @@
 name = "sylva-render"
 description = "渲染层：overlay 窗口 + Windows.UI.Composition/Direct2D/DirectWrite 绘制"
 version.workspace = true
+rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 

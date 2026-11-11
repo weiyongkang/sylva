@@ -21,18 +21,18 @@
 
 use std::cell::RefCell;
 
-use windows::core::{implement, Interface, Result, GUID, HSTRING, PCWSTR};
 use windows::Foundation::{IPropertyValue, PropertyValue};
 use windows::Graphics::Effects::{
-    IGraphicsEffect, IGraphicsEffectSource, IGraphicsEffectSource_Impl, IGraphicsEffect_Impl,
+    IGraphicsEffect, IGraphicsEffect_Impl, IGraphicsEffectSource, IGraphicsEffectSource_Impl,
 };
+use windows::UI::Composition::CompositionEffectSourceParameter;
 use windows::Win32::Foundation::{E_BOUNDS, E_INVALIDARG};
 use windows::Win32::Graphics::Direct2D::CLSID_D2D1GaussianBlur;
 use windows::Win32::System::WinRT::Graphics::Direct2D::{
-    IGraphicsEffectD2D1Interop, IGraphicsEffectD2D1Interop_Impl, GRAPHICS_EFFECT_PROPERTY_MAPPING,
-    GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
+    GRAPHICS_EFFECT_PROPERTY_MAPPING, GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
+    IGraphicsEffectD2D1Interop, IGraphicsEffectD2D1Interop_Impl,
 };
-use windows::UI::Composition::CompositionEffectSourceParameter;
+use windows::core::{GUID, HSTRING, Interface, PCWSTR, Result, implement};
 
 #[implement(IGraphicsEffect, IGraphicsEffectSource, IGraphicsEffectD2D1Interop)]
 pub struct GaussianBlurEffect {

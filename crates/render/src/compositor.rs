@@ -31,15 +31,15 @@
 //! 的**偏移** = 栅栏窗口坐标（即栅栏虚拟坐标）；其**裁剪几何**在视觉本地坐标空间
 //! （偏移恒 (0,0)，铺满整个视觉），圆角与栅栏一致。
 
-use windows::core::{Interface, Result, HSTRING};
 use windows::Graphics::Effects::IGraphicsEffect;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
     CompositionBackdropBrush, CompositionEffectBrush, CompositionGeometricClip,
     CompositionRoundedRectangleGeometry, ContainerVisual, SpriteVisual,
 };
+use windows::Win32::Foundation::HWND;
+use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
+use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 use sylva_shell::icons::IconData;
@@ -47,7 +47,7 @@ use sylva_shell::icons::IconData;
 use sylva_core::model::FenceLayout;
 
 use crate::device::RenderDevice;
-use crate::draw::{draw_scene, IconStore, TextFormats};
+use crate::draw::{IconStore, TextFormats, draw_scene};
 use crate::effects::GaussianBlurEffect;
 use crate::overlay::RectF;
 use crate::scene::{Scene, SceneFence};
@@ -175,7 +175,10 @@ impl Compositor {
             // 内容撑住表面，肉眼即见快速闪烁（打开控制中心就不闪，正是因为面板
             // 让表面变大、工具提示变化不再越界）。这里探测到 Dock 存在就禁止收缩：
             // 表面第一次覆盖到工具提示范围后保持不再缩小，之后工具提示增删不再触发重建。
-            let has_dock = scene.fences.iter().any(|f| f.layout == FenceLayout::Sidebar);
+            let has_dock = scene
+                .fences
+                .iter()
+                .any(|f| f.layout == FenceLayout::Sidebar);
             self.ensure_covering(bbox, has_dock);
         }
         let frame = self.surface.begin_frame()?;
@@ -281,22 +284,25 @@ impl Compositor {
         for (i, f) in scene.fences.iter().enumerate() {
             if f.blur {
                 self.sync_blur(i, f);
-            } else { match self.blurs[i].take() { Some(bv) => {
-                if let Ok(children) = self.root.Children() {
-                    if let Err(e) = children.Remove(&bv.visual) {
-                        tracing::warn!(?e, i, "移除模糊视觉失败");
-                    }
+            } else {
+                // edition 2024 下 `if let` 的临时值会在进入 else 前析构；先把取值
+                // 提出来，使两个 edition 的行为一致（也避免 clippy 要求折叠回去）。
+                let taken = self.blurs[i].take();
+                if let Some(bv) = taken
+                    && let Ok(children) = self.root.Children()
+                    && let Err(e) = children.Remove(&bv.visual)
+                {
+                    tracing::warn!(?e, i, "移除模糊视觉失败");
                 }
-            } _ => {}}}
+            }
         }
         // 回收尾部多余视觉（栅栏数量减少时）
         while self.blurs.len() > scene.fences.len() {
-            if let Some(Some(bv)) = self.blurs.pop() {
-                if let Ok(children) = self.root.Children() {
-                    if let Err(e) = children.Remove(&bv.visual) {
-                        tracing::warn!(?e, "移除尾部模糊视觉失败");
-                    }
-                }
+            if let Some(Some(bv)) = self.blurs.pop()
+                && let Ok(children) = self.root.Children()
+                && let Err(e) = children.Remove(&bv.visual)
+            {
+                tracing::warn!(?e, "移除尾部模糊视觉失败");
             }
         }
     }

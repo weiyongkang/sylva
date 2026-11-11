@@ -9,12 +9,12 @@
 //! 注意：图标枚举走 `IShellFolder`（见 `items.rs`），不依赖 DefView 是否存在，
 //! 因此用户开启「隐藏图标」时本模块的接管流程依然成立。
 
-use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, FindWindowExW, FindWindowW, GetClassNameW, GetParent, SendMessageW,
-    ShowWindow, SW_HIDE, SW_SHOW,
+    EnumChildWindows, FindWindowExW, FindWindowW, GetClassNameW, GetParent, SW_HIDE, SW_SHOW,
+    SendMessageW, ShowWindow,
 };
+use windows::core::{BOOL, PCWSTR};
 
 /// 触发桌面 WorkerW 生成的私有消息（广泛使用的 Progman 技巧）。
 const WM_SPAWN_WORKERW: u32 = 0x052C;
@@ -56,10 +56,10 @@ impl DesktopHierarchy {
 
     /// 恢复真实图标列表。
     pub fn restore_icons(&self) {
-        if let Some(lv) = self.list_view {
-            if !lv.is_invalid() {
-                let _shw = unsafe { ShowWindow(lv, SW_SHOW) };
-            }
+        if let Some(lv) = self.list_view
+            && !lv.is_invalid()
+        {
+            let _shw = unsafe { ShowWindow(lv, SW_SHOW) };
         }
     }
 }
@@ -146,18 +146,20 @@ fn find_class_descendant(hwnd: HWND, class_name: &str) -> Option<HWND> {
     ctx.found
 }
 
-unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL { unsafe {
-    let ctx = &mut *(lparam.0 as *mut FindCtx);
-    if ctx.found.is_some() {
-        return BOOL(0); // 已找到，停止
+unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    unsafe {
+        let ctx = &mut *(lparam.0 as *mut FindCtx);
+        if ctx.found.is_some() {
+            return BOOL(0); // 已找到，停止
+        }
+        if class_of(hwnd).as_deref() == Some(ctx.class_name.as_str()) {
+            ctx.found = Some(hwnd);
+            BOOL(0)
+        } else {
+            BOOL(1) // 继续枚举
+        }
     }
-    if class_of(hwnd).as_deref() == Some(ctx.class_name.as_str()) {
-        ctx.found = Some(hwnd);
-        BOOL(0)
-    } else {
-        BOOL(1) // 继续枚举
-    }
-}}
+}
 
 /// 读取窗口类名。
 fn class_of(hwnd: HWND) -> Option<String> {

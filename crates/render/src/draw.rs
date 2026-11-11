@@ -8,22 +8,23 @@
 
 use std::collections::HashMap;
 
-use windows::core::{Result, PCWSTR};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap, ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_ELLIPSE, D2D1_LAYER_PARAMETERS, D2D1_ROUNDED_RECT,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE, D2D1_LAYER_PARAMETERS,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    IDWriteFactory, IDWriteTextFormat, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory,
+    IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::core::{PCWSTR, Result};
 
 use sylva_core::model::{FenceLayout, FenceStyle, SidebarPosition};
 use sylva_shell::icons::IconData;
@@ -579,7 +580,8 @@ fn draw_fence_detail(
             if let Some(rgb) = TINT_COLORS.get(i) {
                 let rgb = *rgb;
                 let active = d.tint == Some(rgb);
-                let hover = matches!(c.hover_zone, Some(ConsoleZone::FenceTint(Some(t))) if t == rgb);
+                let hover =
+                    matches!(c.hover_zone, Some(ConsoleZone::FenceTint(Some(t))) if t == rgb);
                 draw_tint_swatch(target, theme, *rect, rgb, active, hover, accent)?;
             }
         }
@@ -616,9 +618,8 @@ fn draw_fence_detail(
             right: label_x + label_w,
             bottom: d.sidebar_left.y + 24.0 * s,
         };
-        let pos_label_brush = unsafe {
-            target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.45 * full_t]), None)?
-        };
+        let pos_label_brush =
+            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.45 * full_t]), None)? };
         draw_text(target, "位置", &formats.detail, lr6, &pos_label_brush);
         for (rect, pos, label) in [
             (d.sidebar_left, SidebarPosition::Left, "左"),
@@ -831,42 +832,40 @@ fn draw_fence_inner(
     unsafe { target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
 
     // 悬停高亮：画在对应图标底下（含列表行）。
-    if let Some(hi) = fence.hover_icon {
-        if let Some(icon) = fence.icons.get(hi) {
-            // 行高与 App 层布局一致：图标（或标签）高 + 行距，保证整行被高亮覆盖。
-            let row_extent = icon.size.max(theme.label.size * 1.6) + theme.list_row_gap;
-            let highlight = if fence.layout == FenceLayout::List {
-                // 列表：高亮整行（图标 + 名称 + 详情列）
-                D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: icon.x - 4.0,
-                        top: icon.y - 2.0,
-                        right: fence.x + fence.width - theme.fence_padding,
-                        bottom: icon.y + row_extent,
-                    },
-                    radiusX: 8.0,
-                    radiusY: 8.0,
-                }
-            } else {
-                D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: icon.x - 4.0,
-                        top: icon.y - 4.0,
-                        right: icon.x + icon.size + 4.0,
-                        bottom: icon.y + icon.size + 4.0,
-                    },
-                    radiusX: 8.0,
-                    radiusY: 8.0,
-                }
-            };
-            let fill =
-                unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.12]), None)? };
-            let edge =
-                unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.30]), None)? };
-            unsafe {
-                target.FillRoundedRectangle(&highlight, &fill);
-                target.DrawRoundedRectangle(&highlight, &edge, 1.0, None);
+    if let Some(hi) = fence.hover_icon
+        && let Some(icon) = fence.icons.get(hi)
+    {
+        // 行高与 App 层布局一致：图标（或标签）高 + 行距，保证整行被高亮覆盖。
+        let row_extent = icon.size.max(theme.label.size * 1.6) + theme.list_row_gap;
+        let highlight = if fence.layout == FenceLayout::List {
+            // 列表：高亮整行（图标 + 名称 + 详情列）
+            D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: icon.x - 4.0,
+                    top: icon.y - 2.0,
+                    right: fence.x + fence.width - theme.fence_padding,
+                    bottom: icon.y + row_extent,
+                },
+                radiusX: 8.0,
+                radiusY: 8.0,
             }
+        } else {
+            D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: icon.x - 4.0,
+                    top: icon.y - 4.0,
+                    right: icon.x + icon.size + 4.0,
+                    bottom: icon.y + icon.size + 4.0,
+                },
+                radiusX: 8.0,
+                radiusY: 8.0,
+            }
+        };
+        let fill = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.12]), None)? };
+        let edge = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.30]), None)? };
+        unsafe {
+            target.FillRoundedRectangle(&highlight, &fill);
+            target.DrawRoundedRectangle(&highlight, &edge, 1.0, None);
         }
     }
 
@@ -913,10 +912,10 @@ fn draw_fence_inner(
 
     for (ii, icon) in fence.icons.iter().enumerate() {
         // 拖动中的图标跳过原位绘制（最后单独绘制在光标处，放大+半透明）
-        if let Some(reorder) = &fence.reorder_drag {
-            if ii == reorder.icon_idx {
-                continue;
-            }
+        if let Some(reorder) = &fence.reorder_drag
+            && ii == reorder.icon_idx
+        {
+            continue;
         }
         // 悬停放大：以图标中心放大（scale 由 App 层补间填值），并垫一层柔光
         let grow = (icon.size * (icon.scale - 1.0) * 0.5).max(0.0);
@@ -1036,27 +1035,26 @@ fn draw_fence_inner(
     }
 
     // 侧边栏拖动排序：绘制被拖动的图标（跟随光标，放大+半透明）
-    if let Some(reorder) = &fence.reorder_drag {
-        if let Some(icon) = fence.icons.get(reorder.icon_idx) {
-            if let Some(bmp) = icons.get(icon.bitmap_id) {
-                let drag_size = icon.size * 1.15;
-                let half = drag_size / 2.0;
-                let drag_dest = D2D_RECT_F {
-                    left: reorder.cursor_x - half,
-                    top: reorder.cursor_y - half,
-                    right: reorder.cursor_x + half,
-                    bottom: reorder.cursor_y + half,
-                };
-                unsafe {
-                    target.DrawBitmap(
-                        bmp,
-                        Some(&drag_dest),
-                        0.8,
-                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                        None,
-                    );
-                }
-            }
+    if let Some(reorder) = &fence.reorder_drag
+        && let Some(icon) = fence.icons.get(reorder.icon_idx)
+        && let Some(bmp) = icons.get(icon.bitmap_id)
+    {
+        let drag_size = icon.size * 1.15;
+        let half = drag_size / 2.0;
+        let drag_dest = D2D_RECT_F {
+            left: reorder.cursor_x - half,
+            top: reorder.cursor_y - half,
+            right: reorder.cursor_x + half,
+            bottom: reorder.cursor_y + half,
+        };
+        unsafe {
+            target.DrawBitmap(
+                bmp,
+                Some(&drag_dest),
+                0.8,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
         }
     }
 
@@ -1094,67 +1092,59 @@ fn draw_fence_inner(
 
     // 悬停工具提示：标签被截断成「…」时显示完整名称（Windows 资源管理器风格）。
     // 画在裁剪区之外、栅栏矩形之内（窗口区域 = 栅栏并集，区域外的绘制不可见）。
-    if let Some(hi) = fence.hover_icon {
-        if let Some(icon) = fence.icons.get(hi) {
-            if !icon.label.is_empty()
-                && label_max_width(fence, icon, theme) > 0.0
-                && !text_fits(
-                    &icon.label,
-                    label_max_width(fence, icon, theme),
-                    theme.label.size,
-                )
-            {
-                draw_tooltip(
-                    target,
-                    theme,
-                    &icon.label,
-                    formats,
-                    &brushes.label,
-                    fence,
-                    icon,
-                );
-            }
-        }
+    if let Some(hi) = fence.hover_icon
+        && let Some(icon) = fence.icons.get(hi)
+        && !icon.label.is_empty()
+        && label_max_width(fence, icon, theme) > 0.0
+        && !text_fits(
+            &icon.label,
+            label_max_width(fence, icon, theme),
+            theme.label.size,
+        )
+    {
+        draw_tooltip(
+            target,
+            theme,
+            &icon.label,
+            formats,
+            &brushes.label,
+            fence,
+            icon,
+        );
     }
 
     // 侧边栏 Dock 工具提示：矩形由 App 层按屏幕边界算好（可延伸到栅栏之外、
     // 不受裁剪限制），画在裁剪区外显示完整名称，不再被 dock 右缘/内容裁剪截断。
-    if fence.layout == FenceLayout::Sidebar {
-        if let (Some(hi), Some(tt)) = (fence.hover_icon, fence.tooltip_rect) {
-            if let Some(icon) = fence.icons.get(hi) {
-                if !icon.label.is_empty() {
-                    let s = theme.scale;
-                    let pad = 7.0 * s;
-                    let rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: tt.x,
-                            top: tt.y,
-                            right: tt.x + tt.w,
-                            bottom: tt.y + tt.h,
-                        },
-                        radiusX: 6.0 * s,
-                        radiusY: 6.0 * s,
-                    };
-                    let bg_b = unsafe {
-                        target.CreateSolidColorBrush(&color([0.10, 0.12, 0.16, 0.96]), None)?
-                    };
-                    let edge_b = unsafe {
-                        target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.35]), None)?
-                    };
-                    unsafe {
-                        target.FillRoundedRectangle(&rr, &bg_b);
-                        target.DrawRoundedRectangle(&rr, &edge_b, 1.0, None);
-                    }
-                    let lr = D2D_RECT_F {
-                        left: tt.x + pad,
-                        top: tt.y + pad,
-                        right: tt.x + tt.w - pad,
-                        bottom: tt.y + tt.h - pad,
-                    };
-                    draw_text(target, &icon.label, &formats.label, lr, &brushes.label);
-                }
-            }
+    if fence.layout == FenceLayout::Sidebar
+        && let (Some(hi), Some(tt)) = (fence.hover_icon, fence.tooltip_rect)
+        && let Some(icon) = fence.icons.get(hi)
+        && !icon.label.is_empty()
+    {
+        let s = theme.scale;
+        let pad = 7.0 * s;
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: tt.x,
+                top: tt.y,
+                right: tt.x + tt.w,
+                bottom: tt.y + tt.h,
+            },
+            radiusX: 6.0 * s,
+            radiusY: 6.0 * s,
+        };
+        let bg_b = unsafe { target.CreateSolidColorBrush(&color([0.10, 0.12, 0.16, 0.96]), None)? };
+        let edge_b = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.35]), None)? };
+        unsafe {
+            target.FillRoundedRectangle(&rr, &bg_b);
+            target.DrawRoundedRectangle(&rr, &edge_b, 1.0, None);
         }
+        let lr = D2D_RECT_F {
+            left: tt.x + pad,
+            top: tt.y + pad,
+            right: tt.x + tt.w - pad,
+            bottom: tt.y + tt.h - pad,
+        };
+        draw_text(target, &icon.label, &formats.label, lr, &brushes.label);
     }
 
     // 滚动条指示条：内容超出可视区时在右缘画细条（滚轮滚动，不拖拽）。

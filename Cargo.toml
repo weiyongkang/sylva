@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/core",
     "crates/shell",
@@ -8,9 +8,11 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 version = "0.1.0"
 license = "MIT"
+# edition 2024 最低要求 1.85；代码中使用 let-chains（if ... && let ...）需 1.88。
+rust-version = "1.88"
 
 # 共享依赖：各 crate 通过 `workspace = true` 引用，保证版本唯一。
 [workspace.dependencies]

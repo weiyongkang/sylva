@@ -7,17 +7,17 @@
 
 use std::path::Path;
 
-use windows::core::{HRESULT, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::{
     ITEMIDLIST, STRRET, STRRET_CSTR, STRRET_TYPE, STRRET_WSTR,
 };
 use windows::Win32::UI::Shell::{
-    IShellFolder, SHGetDesktopFolder, SHGetPathFromIDListW, SHParseDisplayName, ShellExecuteW,
-    SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHGDNF,
+    IShellFolder, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHGDNF, SHGetDesktopFolder,
+    SHGetPathFromIDListW, SHParseDisplayName, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{HRESULT, PCWSTR};
 
 use sylva_core::model::{ItemId, ItemKind};
 
@@ -92,11 +92,14 @@ pub fn enumerate_desktop_items() -> windows::core::Result<Vec<DesktopItem>> {
         let pidl = slot[0];
         slot[0] = std::ptr::null_mut();
 
-        match build_item(&desktop, pidl) { Some(item) => {
-            items.push(item);
-        } _ => {
-            unsafe { CoTaskMemFree(Some(pidl as *const _)) };
-        }}
+        match build_item(&desktop, pidl) {
+            Some(item) => {
+                items.push(item);
+            }
+            _ => {
+                unsafe { CoTaskMemFree(Some(pidl as *const _)) };
+            }
+        }
     }
     Ok(items)
 }

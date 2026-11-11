@@ -5,13 +5,13 @@
 //! `ID2D1DeviceContext`（Deref 即 `ID2D1RenderTarget`，与既有绘制路径一致），
 //! 绘制完成后 `finish` 提交给合成器。`RequestCommitAsync` 由合成器统一调用。
 
-use windows::core::{Interface, Result};
 use windows::Foundation::Size;
 use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
+use windows::UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Direct2D::{ID2D1DeviceContext, ID2D1RenderTarget};
 use windows::Win32::System::WinRT::Composition::ICompositionDrawingSurfaceInterop;
-use windows::UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice};
+use windows::core::{Interface, Result};
 
 /// 合成绘制表面（premultiplied BGRA，与图标像素格式一致）。
 pub struct CompositionSurface {

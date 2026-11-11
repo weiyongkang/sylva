@@ -30,52 +30,51 @@ pub(crate) use std::rc::Rc;
 pub(crate) use std::sync::OnceLock;
 pub(crate) use std::time::Instant;
 
-pub(crate) use windows::core::{BOOL, PCWSTR, PWSTR};
 pub(crate) use windows::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM,
+    ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM,
 };
-pub(crate) use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+pub(crate) use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 pub(crate) use windows::Win32::System::Console::SetConsoleCtrlHandler;
 pub(crate) use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
-pub(crate) use windows::Win32::System::Ole::OleInitialize;
 pub(crate) use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
+pub(crate) use windows::Win32::System::Ole::OleInitialize;
 pub(crate) use windows::Win32::System::Threading::CreateMutexW;
 pub(crate) use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 pub(crate) use windows::Win32::UI::Input::Ime::{
-    ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM,
+    CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
 };
 pub(crate) use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP,
 };
 pub(crate) use windows::Win32::UI::Shell::{
-    DragQueryFileW, FileOpenDialog, IFileOpenDialog, IShellItem, IShellItemArray,
-    FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, HDROP, SIGDN_FILESYSPATH,
+    DragQueryFileW, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog,
+    HDROP, IFileOpenDialog, IShellItem, IShellItemArray, SIGDN_FILESYSPATH,
 };
 pub(crate) use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, PostMessageW,
-    SetProcessDPIAware, SystemParametersInfoW, TrackPopupMenu, HMENU,
-    MF_SEPARATOR, MF_STRING, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_NONOTIFY,
-    TPM_RETURNCMD,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HMENU, MF_SEPARATOR,
+    MF_STRING, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetProcessDPIAware,
+    SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD, TrackPopupMenu,
 };
+pub(crate) use windows::core::{BOOL, PCWSTR, PWSTR};
 
 pub(crate) use sylva_core::config::ConfigStore;
-pub(crate) use sylva_core::magnet::{settle_move, settle_resize, FreeSides, FENCE_GAP};
+pub(crate) use sylva_core::magnet::{FENCE_GAP, FreeSides, settle_move, settle_resize};
 pub(crate) use sylva_core::model::{
     Desk, Fence, FenceAppearance, FenceLayout, FenceState, FenceStyle, Icon, Rect, SidebarPosition,
     Vec2,
 };
 pub(crate) use sylva_render::{
-    run_message_loop, Compositor, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit,
-    ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene, SceneConsole,
-    SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme, GRID_CAPTION_H_MULT,
-    GRIP_SIZE, WM_APP_QUIT, WM_SYLVA_INJECT,
+    Compositor, ConsoleHit, ConsoleZone, FenceHit, GRID_CAPTION_H_MULT, GRIP_SIZE, HitModel,
+    IconHit, ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene,
+    SceneConsole, SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme,
+    WM_APP_QUIT, WM_SYLVA_INJECT, run_message_loop,
 };
 pub(crate) use sylva_shell::icons::IconData;
 pub(crate) use sylva_shell::items::DesktopItem;
@@ -296,22 +295,26 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("data");
     // 从旧位置（%APPDATA%\Sylva）迁移：旧版数据不在 exe 同级时搬过来，一次完成。
-    if !data_dir.join("desk.json").exists() {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let old_dir = PathBuf::from(appdata).join("Sylva");
-            if old_dir.join("desk.json").exists() {
-                let _ = std::fs::create_dir_all(&data_dir);
-                // 逐文件迁移（跨卷 rename 会失败，fallback 到 copy）
-                for entry in std::fs::read_dir(&old_dir).into_iter().flatten().flatten() {
-                    let src = entry.path();
-                    let dst = data_dir.join(entry.file_name());
-                    if std::fs::rename(&src, &dst).is_err() {
-                        let _ = std::fs::copy(&src, &dst);
-                        let _ = std::fs::remove_file(&src);
-                    }
+    if !data_dir.join("desk.json").exists()
+        && let Ok(appdata) = std::env::var("APPDATA")
+    {
+        let old_dir = PathBuf::from(appdata).join("Sylva");
+        if old_dir.join("desk.json").exists() {
+            let _ = std::fs::create_dir_all(&data_dir);
+            // 逐文件迁移（跨卷 rename 会失败，fallback 到 copy）
+            for entry in std::fs::read_dir(&old_dir).into_iter().flatten().flatten() {
+                let src = entry.path();
+                let dst = data_dir.join(entry.file_name());
+                if std::fs::rename(&src, &dst).is_err() {
+                    let _ = std::fs::copy(&src, &dst);
+                    let _ = std::fs::remove_file(&src);
                 }
-                tracing::info!("已从 {} 迁移数据到 {}", old_dir.display(), data_dir.display());
             }
+            tracing::info!(
+                "已从 {} 迁移数据到 {}",
+                old_dir.display(),
+                data_dir.display()
+            );
         }
     }
 
@@ -430,12 +433,12 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         if item_index.contains_key(id) {
             continue;
         }
-        if let Some(path) = ic.path.as_deref() {
-            if let Ok(dt) = sylva_shell::items::item_from_path(path) {
-                item_index.insert(dt.id.clone(), items.len());
-                items.push(dt);
-                restored += 1;
-            }
+        if let Some(path) = ic.path.as_deref()
+            && let Ok(dt) = sylva_shell::items::item_from_path(path)
+        {
+            item_index.insert(dt.id.clone(), items.len());
+            items.push(dt);
+            restored += 1;
         }
     }
     if restored > 0 {
@@ -561,7 +564,10 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
             return None;
         }
         let _reentry = ReentryGuard;
-        handle_event(&mut runtime2.borrow_mut(), ev)
+        // edition 2024 会先析构尾表达式中的 RefMut 临时值、再析构局部变量。
+        // 这里显式绑定借用，固定析构顺序（先释放借用，再复位再入标志）。
+        let mut rt = runtime2.borrow_mut();
+        handle_event(&mut rt, ev)
     }));
     overlay.set_model(model);
 
@@ -591,7 +597,9 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         tracing::info!(ms, "SYLVA_AUTOSTOP_MS 已设置，到点自动退出");
     }
 
-    tracing::info!("Sylva 已就绪：拖边缘/角缩放、标题栏拖动、双击打开、文件拖入/粘贴添加；Ctrl+Alt+T 控制中心，Ctrl+Shift+F10 退出");
+    tracing::info!(
+        "Sylva 已就绪：拖边缘/角缩放、标题栏拖动、双击打开、文件拖入/粘贴添加；Ctrl+Alt+T 控制中心，Ctrl+Shift+F10 退出"
+    );
     run_message_loop();
 
     memory::report("退出前");
@@ -600,17 +608,19 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
 }
 
 /// Ctrl+C / 关闭终端：通知主循环退出（信号线程不做窗口访问）。
-unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL { unsafe {
-    if let Some(hwnd) = OVERLAY_HWND.get() {
-        let _ = PostMessageW(
-            Some(HWND(*hwnd as *mut core::ffi::c_void)),
-            WM_APP_QUIT,
-            WPARAM(0),
-            LPARAM(0),
-        );
+unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
+    unsafe {
+        if let Some(hwnd) = OVERLAY_HWND.get() {
+            let _ = PostMessageW(
+                Some(HWND(*hwnd as *mut core::ffi::c_void)),
+                WM_APP_QUIT,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+        BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
     }
-    BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
-}}
+}
 
 /// 栅栏用于碰撞/夹屏的真实矩形：自动高度（`bounds.h <= 0`）时用最近一次布局
 /// 渲染高度。视觉矩形 = 模型矩形（拖拽已无补间），碰撞检测与实际可见区域一致。
@@ -739,10 +749,10 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 let cand = Rect::new(x, y, w, h);
                 let mut out = settle_move(&cand, &others, &wa, FENCE_GAP);
                 // 侧边栏 dock 夹在工作区内（任务栏扣除后），下沿不越过任务栏
-                if let Some(f) = rt.desk.fences.get(fence) {
-                    if f.appearance.layout == FenceLayout::Sidebar {
-                        out = clamp_sidebar_work_rect(out, wa, f.appearance.sidebar_pos);
-                    }
+                if let Some(f) = rt.desk.fences.get(fence)
+                    && f.appearance.layout == FenceLayout::Sidebar
+                {
+                    out = clamp_sidebar_work_rect(out, wa, f.appearance.sidebar_pos);
                 }
                 if let Some(f) = rt.desk.fences.get_mut(fence) {
                     f.bounds.x = out.x;
@@ -777,21 +787,21 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             );
             // 侧边栏 dock：厚度轴锁定为「紧贴放大图标」的停靠值——纵向锁 x/w、
             // 横向锁 y/h，只保留用户拖动的那一轴，宽度/高度弹回锁定值，放大图标不再被裁。
-            if let Some(f) = rt.desk.fences.get(fence) {
-                if f.appearance.layout == FenceLayout::Sidebar {
-                    let d = sidebar_dock_rect(rt.theme.scale, f, &wa);
-                    out = if f.appearance.sidebar_pos == SidebarPosition::Top {
-                        Rect::new(out.x, d.y, out.w, d.h)
-                    } else {
-                        Rect::new(d.x, out.y, d.w, out.h)
-                    };
-                    // 夹在工作区内（任务栏扣除后）：纵向 dock 下沿不越过任务栏
-                    out = clamp_sidebar_work_rect(
-                        out,
-                        work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh),
-                        f.appearance.sidebar_pos,
-                    );
-                }
+            if let Some(f) = rt.desk.fences.get(fence)
+                && f.appearance.layout == FenceLayout::Sidebar
+            {
+                let d = sidebar_dock_rect(rt.theme.scale, f, &wa);
+                out = if f.appearance.sidebar_pos == SidebarPosition::Top {
+                    Rect::new(out.x, d.y, out.w, d.h)
+                } else {
+                    Rect::new(d.x, out.y, d.w, out.h)
+                };
+                // 夹在工作区内（任务栏扣除后）：纵向 dock 下沿不越过任务栏
+                out = clamp_sidebar_work_rect(
+                    out,
+                    work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh),
+                    f.appearance.sidebar_pos,
+                );
             }
             if let Some(f) = rt.desk.fences.get_mut(fence) {
                 f.bounds = out;
@@ -1080,10 +1090,10 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 let i = rt
                     .selected_fence
                     .min(rt.desk.fences.len().saturating_sub(1));
-                if let Some(paths) = pick_paths(rt.hwnd) {
-                    if let Some(new_dir) = paths.first() {
-                        change_fence_storage(rt, i, new_dir);
-                    }
+                if let Some(paths) = pick_paths(rt.hwnd)
+                    && let Some(new_dir) = paths.first()
+                {
+                    change_fence_storage(rt, i, new_dir);
                 }
             }
             // 标签页已随小组件一并移除；命中模型不再产生该控件，兜底吞掉。
@@ -1262,7 +1272,12 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 tracing::info!(vx, vy, vw, vh, "显示拓扑变化：overlay 已重设并夹回栅栏");
             }
         }
-        OverlayEvent::SidebarReorderDrag { fence, icon, mx, my } => {
+        OverlayEvent::SidebarReorderDrag {
+            fence,
+            icon,
+            mx,
+            my,
+        } => {
             // 侧边栏图标拖动中：记录拖动状态，触发重绘
             // 排序计算在 build_scene 中基于实际图标位置完成
             rt.sidebar_reorder = Some((fence, icon, mx, my));
@@ -1273,14 +1288,16 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             rt.sidebar_reorder = None;
             rt.reorder_slot_order.clear();
             rt.current_icon_positions.clear();
-            if let Some(f) = rt.desk.fences.get_mut(fence) {
-                if from < f.icon_ids.len() && to <= f.icon_ids.len() && from != to {
-                    let id = f.icon_ids.remove(from);
-                    let insert_at = if to > from { to - 1 } else { to };
-                    f.icon_ids.insert(insert_at, id);
-                    let _ = rt.store.save(&rt.desk);
-                    tracing::info!(from, to, "侧边栏图标已重排");
-                }
+            if let Some(f) = rt.desk.fences.get_mut(fence)
+                && from < f.icon_ids.len()
+                && to <= f.icon_ids.len()
+                && from != to
+            {
+                let id = f.icon_ids.remove(from);
+                let insert_at = if to > from { to - 1 } else { to };
+                f.icon_ids.insert(insert_at, id);
+                let _ = rt.store.save(&rt.desk);
+                tracing::info!(from, to, "侧边栏图标已重排");
             }
             redraw = true;
         }

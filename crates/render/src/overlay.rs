@@ -17,43 +17,43 @@
 
 use std::sync::OnceLock;
 
-use windows::core::{Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, TRUE};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, EqualRgn, SetBkColor, SetTextColor,
-    SetWindowRgn, HBRUSH, HDC, HRGN, RGN_OR,
+    CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, EqualRgn, HBRUSH, HDC, HRGN, RGN_OR,
+    SetBkColor, SetTextColor, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::Ime::{
-    ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_COMPSTR, GCS_RESULTSTR,
-    IME_COMPOSITION_STRING,
+    GCS_COMPSTR, GCS_RESULTSTR, IME_COMPOSITION_STRING, ImmGetCompositionStringW, ImmGetContext,
+    ImmReleaseContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_ALT,
-    MOD_CONTROL, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_F10,
+    GetKeyState, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, ReleaseCapture, SetCapture,
+    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_F10,
 };
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, Shell_NotifyIconW, HDROP,
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP, NIF_ICON, NIF_MESSAGE,
+    NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowThreadProcessId, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT,
-    HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
-    IDC_SIZENWSE, IDC_SIZEWE, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOWNA,
-    SW_SHOWNOACTIVATE, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_TIMER,
-    WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
+    GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowThreadProcessId, HCURSOR, HICON, HTCLIENT, HTTRANSPARENT, ICON_BIG, ICON_SMALL,
+    IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer,
+    LoadCursorW, LoadIconW, MSG, PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetCursor,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
+    WM_ERASEBKGND, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
+use windows::core::{PCWSTR, Result};
 
 use sylva_core::model::{FenceLayout, FenceStyle, SidebarPosition};
 
@@ -324,9 +324,18 @@ pub enum OverlayEvent {
     DisplayChange,
     /// 侧边栏图标拖动中（重排序）：`icon` 是被拖动的图标在 `icon_ids` 中的下标，
     /// `(mx, my)` 为当前光标位置（虚拟屏幕物理像素）。
-    SidebarReorderDrag { fence: usize, icon: usize, mx: f32, my: f32 },
+    SidebarReorderDrag {
+        fence: usize,
+        icon: usize,
+        mx: f32,
+        my: f32,
+    },
     /// 侧边栏图标拖动结束：`from` 是原始下标，`to` 是目标插入位置。
-    SidebarReorderEnd { fence: usize, from: usize, to: usize },
+    SidebarReorderEnd {
+        fence: usize,
+        from: usize,
+        to: usize,
+    },
 }
 
 /// 拖拽会话（按下到松开之间持续有效）。
@@ -719,9 +728,9 @@ unsafe extern "system" fn proxy_proc(
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-) -> LRESULT { unsafe {
-    DefWindowProcW(hwnd, msg, wparam, lparam)
-}}
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
 
 /// 把命中模型的栅栏矩形并集设为窗口区域。区域外：
 /// - 点击/命中直接落到下方窗口（点击穿透的关键）；
@@ -879,11 +888,11 @@ unsafe extern "system" fn wnd_proc(
                 let px = pt.x as f32;
                 let py = pt.y as f32;
                 // 控制台面板优先：滚轮滚动待办列表
-                if let Some(c) = &state.model.console {
-                    if c.rect.contains(px, py) {
-                        emit_event(hwnd, state, OverlayEvent::ConsoleScroll { delta });
-                        return LRESULT(0);
-                    }
+                if let Some(c) = &state.model.console
+                    && c.rect.contains(px, py)
+                {
+                    emit_event(hwnd, state, OverlayEvent::ConsoleScroll { delta });
+                    return LRESULT(0);
                 }
                 if let Some(f) = state.model.fences.iter().find(|f| f.body.contains(px, py)) {
                     emit_event(
@@ -984,10 +993,10 @@ unsafe extern "system" fn wnd_proc(
             let state = unsafe { &mut *ptr };
             let (mx, my) = client_point(lparam);
             // 命中：控制台 → 图标 → 栅栏；未命中任何交互目标时吞掉。
-            if let Some(c) = &state.model.console {
-                if c.rect.contains(mx, my) {
-                    return LRESULT(0);
-                }
+            if let Some(c) = &state.model.console
+                && c.rect.contains(mx, my)
+            {
+                return LRESULT(0);
             }
             if let Some(icon) = state.model.icons.iter().find(|i| i.rect.contains(mx, my)) {
                 emit_event(
@@ -1233,54 +1242,54 @@ fn console_resize_zone_at(c: &ConsoleHit, mx: f32, my: f32) -> Option<ResizeZone
 fn on_button_down(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     // 内联编辑框优先：点编辑框内部 = 把光标定位到点击处，不落到下面的栅栏/图标
     // （否则会触发「点击别处提交编辑」，用户根本无法点击文本）。
-    if let Some(er) = state.model.edit_rect {
-        if er.contains(mx, my) {
-            emit_event(hwnd, state, OverlayEvent::EditCaret { x: mx });
-            return;
-        }
+    if let Some(er) = state.model.edit_rect
+        && er.contains(mx, my)
+    {
+        emit_event(hwnd, state, OverlayEvent::EditCaret { x: mx });
+        return;
     }
     // 控制台优先：面板上的点击不落到栅栏/图标。控件（关闭/勾选/删除/添加）优先于
     // 标题栏拖动——关闭按钮就在标题栏内，先判控件才能「点 × 即关」而非开始拖动。
-    if let Some(c) = &state.model.console {
-        if c.rect.contains(mx, my) {
-            if let Some(zone) = console_zone_at(c, mx, my) {
-                emit_event(hwnd, state, OverlayEvent::ConsoleClick { zone });
-                return;
-            }
-            // 右/下边缘与右下角 → 缩放（抓边即缩放，标准窗口行为）
-            if let Some(zone) = console_resize_zone_at(c, mx, my) {
-                state.drag = Some(DragState {
-                    kind: DragKind::ConsoleResize(zone),
-                    fence: usize::MAX,
-                    start: (mx, my),
-                    orig: c.rect,
-                    pressed_icon: None,
-                    ctrl: false,
-                });
-                unsafe {
-                    let _ = SetCursor(Some(zone_cursor(zone)));
-                }
-                unsafe { SetCapture(hwnd) };
-                return;
-            }
-            if c.title.contains(mx, my) {
-                state.drag = Some(DragState {
-                    kind: DragKind::ConsoleMove,
-                    fence: usize::MAX,
-                    start: (mx, my),
-                    orig: c.rect,
-                    pressed_icon: None,
-                    ctrl: false,
-                });
-                unsafe {
-                    let cur = LoadCursorW(None, IDC_SIZEALL).unwrap_or_default();
-                    let _ = SetCursor(Some(cur));
-                }
-                unsafe { SetCapture(hwnd) };
-                return;
-            }
-            return; // 面板空白：吞掉点击
+    if let Some(c) = &state.model.console
+        && c.rect.contains(mx, my)
+    {
+        if let Some(zone) = console_zone_at(c, mx, my) {
+            emit_event(hwnd, state, OverlayEvent::ConsoleClick { zone });
+            return;
         }
+        // 右/下边缘与右下角 → 缩放（抓边即缩放，标准窗口行为）
+        if let Some(zone) = console_resize_zone_at(c, mx, my) {
+            state.drag = Some(DragState {
+                kind: DragKind::ConsoleResize(zone),
+                fence: usize::MAX,
+                start: (mx, my),
+                orig: c.rect,
+                pressed_icon: None,
+                ctrl: false,
+            });
+            unsafe {
+                let _ = SetCursor(Some(zone_cursor(zone)));
+            }
+            unsafe { SetCapture(hwnd) };
+            return;
+        }
+        if c.title.contains(mx, my) {
+            state.drag = Some(DragState {
+                kind: DragKind::ConsoleMove,
+                fence: usize::MAX,
+                start: (mx, my),
+                orig: c.rect,
+                pressed_icon: None,
+                ctrl: false,
+            });
+            unsafe {
+                let cur = LoadCursorW(None, IDC_SIZEALL).unwrap_or_default();
+                let _ = SetCursor(Some(cur));
+            }
+            unsafe { SetCapture(hwnd) };
+            return;
+        }
+        return; // 面板空白：吞掉点击
     }
     // 优先级：缩放区域 > 标题栏 > 空白。
     for f in &state.model.fences {
@@ -1447,16 +1456,16 @@ fn zone_cursor(zone: ResizeZone) -> HCURSOR {
 /// 侧边栏：图标上保持箭头（点击打开），空白处才显示移动把手。
 fn cursor_at(model: &HitModel, mx: f32, my: f32) -> HCURSOR {
     // 控制台面板：边缘/角 = resize 光标，控件/空白 = 箭头，标题栏 = 移动光标
-    if let Some(c) = &model.console {
-        if c.rect.contains(mx, my) {
-            if let Some(zone) = console_resize_zone_at(c, mx, my) {
-                return zone_cursor(zone);
-            }
-            if c.title.contains(mx, my) && console_zone_at(c, mx, my).is_none() {
-                return unsafe { LoadCursorW(None, IDC_SIZEALL).unwrap_or_default() };
-            }
-            return unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() };
+    if let Some(c) = &model.console
+        && c.rect.contains(mx, my)
+    {
+        if let Some(zone) = console_resize_zone_at(c, mx, my) {
+            return zone_cursor(zone);
         }
+        if c.title.contains(mx, my) && console_zone_at(c, mx, my).is_none() {
+            return unsafe { LoadCursorW(None, IDC_SIZEALL).unwrap_or_default() };
+        }
+        return unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() };
     }
     let Some(f) = model
         .fences
@@ -1486,10 +1495,10 @@ fn cursor_at(model: &HitModel, mx: f32, my: f32) -> HCURSOR {
 /// 悬停目标：先图标后栅栏（图标优先）。未命中任何栅栏时返回 None。
 fn hover_key(model: &HitModel, mx: f32, my: f32) -> Option<(usize, Option<usize>)> {
     // 鼠标在控制台面板上时不悬停任何栅栏/图标（面板浮于栅栏之上）
-    if let Some(c) = &model.console {
-        if c.rect.contains(mx, my) {
-            return None;
-        }
+    if let Some(c) = &model.console
+        && c.rect.contains(mx, my)
+    {
+        return None;
     }
     for icon in &model.icons {
         if icon.rect.contains(mx, my) {
@@ -1682,18 +1691,18 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
             let dy = my - drag.start.1;
             let moved = dx * dx + dy * dy;
             let t = CLICK_DRAG_THRESHOLD;
-            if moved < t * t {
-                if let Some(icon) = drag.pressed_icon {
-                    emit_event(
-                        hwnd,
-                        state,
-                        OverlayEvent::IconClicked {
-                            fence: drag.fence,
-                            icon,
-                            ctrl: drag.ctrl,
-                        },
-                    );
-                }
+            if moved < t * t
+                && let Some(icon) = drag.pressed_icon
+            {
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::IconClicked {
+                        fence: drag.fence,
+                        icon,
+                        ctrl: drag.ctrl,
+                    },
+                );
             }
         } else if drag.kind == DragKind::Select {
             // 框选结束：清除橡皮筋显示（选择结果已在最后一次 SelectDrag 中生效）
@@ -1739,13 +1748,15 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
 
 /// 根据光标位置计算侧边栏图标重排的目标插入位置。
 /// 返回值为插入下标（0..=图标总数）：图标将被插入到该下标之前。
-fn compute_reorder_target(model: &HitModel, fence_id: usize, _from: usize, mx: f32, my: f32) -> usize {
+fn compute_reorder_target(
+    model: &HitModel,
+    fence_id: usize,
+    _from: usize,
+    mx: f32,
+    my: f32,
+) -> usize {
     // 收集该栅栏的所有图标，按 x 坐标排序（横向侧边栏）或 y 坐标排序（纵向）
-    let mut icons: Vec<_> = model
-        .icons
-        .iter()
-        .filter(|i| i.fence == fence_id)
-        .collect();
+    let mut icons: Vec<_> = model.icons.iter().filter(|i| i.fence == fence_id).collect();
     if icons.is_empty() {
         return 0;
     }
@@ -1783,10 +1794,10 @@ fn compute_reorder_target(model: &HitModel, fence_id: usize, _from: usize, mx: f
 /// 双击图标：把下标交给 App 打开对应项。
 fn on_double_click(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     // 编辑框内双击同样不穿透（WM_LBUTTONDBLCLK 独立到达，需单独守卫）
-    if let Some(er) = state.model.edit_rect {
-        if er.contains(mx, my) {
-            return;
-        }
+    if let Some(er) = state.model.edit_rect
+        && er.contains(mx, my)
+    {
+        return;
     }
     for icon in &state.model.icons {
         if icon.rect.contains(mx, my) {

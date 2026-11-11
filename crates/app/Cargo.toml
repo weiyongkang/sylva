@@ -2,6 +2,7 @@
 name = "sylva-app"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

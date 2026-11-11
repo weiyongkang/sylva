@@ -81,11 +81,7 @@ pub(crate) fn ease_out_back(t: f32) -> f32 {
 /// 补间进度：`t0` 起 `dur` 秒内返回 0..1，超时返回 None（补间结束）。
 pub(crate) fn tween_progress(t0: Instant, dur: f32, now: Instant) -> Option<f32> {
     let el = now.duration_since(t0).as_secs_f32();
-    if el >= dur {
-        None
-    } else {
-        Some(el / dur)
-    }
+    if el >= dur { None } else { Some(el / dur) }
 }
 
 /// 启用动画定时器（overlay 每 16ms 触发一次 `AnimTick`）。
@@ -106,10 +102,10 @@ pub(crate) fn advance_anim(rt: &mut Runtime) -> bool {
     let now = Instant::now();
     let anim = &mut rt.console_anim;
     // 桌面切换：栅栏整体淡入/淡出补间（结束即清除）
-    if let Some(df) = rt.desktop_fade {
-        if tween_progress(df.t0, df.dur, now).is_none() {
-            rt.desktop_fade = None;
-        }
+    if let Some(df) = rt.desktop_fade
+        && tween_progress(df.t0, df.dur, now).is_none()
+    {
+        rt.desktop_fade = None;
     }
     // 栅栏拖动/缩放补间：结束即从表里摘除（视觉 = 模型）
     rt.fence_tweens

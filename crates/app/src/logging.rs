@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// 初始化日志，返回保活句柄（文件 appender 的 non-blocking worker）。
 ///

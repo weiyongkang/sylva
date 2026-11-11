@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use windows::Win32::Storage::FileSystem::{
-    GetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+    FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, GetFileAttributesW,
 };
 
 use crate::*;
@@ -211,10 +211,10 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
             ic.path = Some(new_path_str.clone());
         }
         // 更新 DesktopItem 路径（用于后续打开/提取图标）
-        if let Some(&idx) = rt.item_index.get(id) {
-            if let Some(item) = rt.items.get_mut(idx) {
-                item.path = Some(new_path_str.clone());
-            }
+        if let Some(&idx) = rt.item_index.get(id)
+            && let Some(item) = rt.items.get_mut(idx)
+        {
+            item.path = Some(new_path_str.clone());
         }
         moved += 1;
     }
@@ -236,7 +236,10 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
         let old_path = std::path::Path::new(old);
         if old_path.is_dir()
             && old_path.starts_with(&rt.library)
-            && old_path.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false)
+            && old_path
+                .read_dir()
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
         {
             let _ = std::fs::remove_dir(old_path);
             tracing::info!("已清理空的旧库子文件夹: {}", old);
@@ -332,7 +335,6 @@ pub(crate) fn reconcile_fences(rt: &mut Runtime) -> bool {
     }
     changed
 }
-
 
 /// 镜像一个链接栅栏的存储文件夹（文件夹 → 栅栏方向）：资源管理器里对文件夹的
 /// 新增/删除/改名 ≤ 后台 `SyncLibrary` 周期（4s）反映到栅栏。栅栏即文件夹——
@@ -469,10 +471,10 @@ fn rehome_item(rt: &mut Runtime, id: &str, dest_dir: &Path) -> bool {
     if let Some(ic) = rt.desk.icons.get_mut(id) {
         ic.path = Some(new_path_str.clone());
     }
-    if let Some(&idx) = rt.item_index.get(id) {
-        if let Some(item) = rt.items.get_mut(idx) {
-            item.path = Some(new_path_str.clone());
-        }
+    if let Some(&idx) = rt.item_index.get(id)
+        && let Some(item) = rt.items.get_mut(idx)
+    {
+        item.path = Some(new_path_str.clone());
     }
     tracing::info!(id, from = %old_path_str, to = %new_path_str, "栅栏库内项已迁移到链接文件夹");
     true
@@ -642,17 +644,17 @@ pub(crate) fn clipboard_file_paths() -> Vec<String> {
         if OpenClipboard(None).is_err() {
             return out;
         }
-        if let Ok(handle) = GetClipboardData(CF_HDROP) {
-            if !handle.is_invalid() {
-                let hdrop = HDROP(handle.0);
-                let n = DragQueryFileW(hdrop, u32::MAX, None);
-                for i in 0..n {
-                    let len = DragQueryFileW(hdrop, i, None);
-                    let mut buf = vec![0u16; len as usize + 1];
-                    DragQueryFileW(hdrop, i, Some(&mut buf));
-                    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                    out.push(String::from_utf16_lossy(&buf[..end]));
-                }
+        if let Ok(handle) = GetClipboardData(CF_HDROP)
+            && !handle.is_invalid()
+        {
+            let hdrop = HDROP(handle.0);
+            let n = DragQueryFileW(hdrop, u32::MAX, None);
+            for i in 0..n {
+                let len = DragQueryFileW(hdrop, i, None);
+                let mut buf = vec![0u16; len as usize + 1];
+                DragQueryFileW(hdrop, i, Some(&mut buf));
+                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                out.push(String::from_utf16_lossy(&buf[..end]));
             }
         }
         let _ = CloseClipboard();

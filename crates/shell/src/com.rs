@@ -3,7 +3,7 @@
 //! Shell 相关的 COM 接口（IShellFolder / IShellItem 等）要求调用线程
 //! 先完成 CoInitializeEx。在应用启动早期调用一次。
 
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 
 /// 初始化当前线程的 COM。已在 STA 初始化时幂等（S_FALSE 视为成功）。
 pub fn init() -> windows::core::Result<()> {

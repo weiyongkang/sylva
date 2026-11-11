@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use windows::Win32::Foundation::SIZE;
-use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, DIBSECTION, HBITMAP};
+use windows::Win32::Graphics::Gdi::{DIBSECTION, DeleteObject, GetObjectW, HBITMAP};
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromIDList, SIIGBF, SIIGBF_ICONONLY,
 };

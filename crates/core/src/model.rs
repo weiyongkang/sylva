@@ -513,10 +513,10 @@ impl Desk {
     pub fn move_icon(&mut self, id: &ItemId, to: Option<u64>) -> Option<IconLocation> {
         let from = self.icon_location(id)?;
         // 从旧位置移除
-        if let Some(fid) = from.fence_id() {
-            if let Some(f) = self.fence_mut(fid) {
-                f.icon_ids.retain(|x| x != id);
-            }
+        if let Some(fid) = from.fence_id()
+            && let Some(f) = self.fence_mut(fid)
+        {
+            f.icon_ids.retain(|x| x != id);
         }
         self.free_icons.retain(|x| x != id);
         // 加入新位置

@@ -7,28 +7,28 @@
 //! （探针实测：缺 DispatcherQueue 时 `Compositor::new()` 返回 E_ACCESSDENIED）。
 //! DispatcherQueue 控制器必须存活到合成器销毁，这里一并持有。
 
-use windows::core::{Interface, Result};
 use windows::System::DispatcherQueueController;
+use windows::UI::Composition::{CompositionGraphicsDevice, Compositor as WinCompositor};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Device, ID2D1Factory, ID2D1Factory1, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Device, ID2D1Factory, ID2D1Factory1,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
     D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_ISOLATED,
+    DWRITE_FACTORY_TYPE_ISOLATED, DWriteCreateFactory, IDWriteFactory,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Composition::ICompositorInterop;
 use windows::Win32::System::WinRT::{
-    CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
+    CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
 };
-use windows::UI::Composition::{CompositionGraphicsDevice, Compositor as WinCompositor};
+use windows::core::{Interface, Result};
 
 /// 渲染设备集合。
 pub struct RenderDevice {
@@ -109,9 +109,8 @@ impl RenderDevice {
                 Err(e) => last_err = Some(e),
             }
         }
-        let d3d = d3d.ok_or_else(|| {
-            last_err.expect("至少尝试过一次 D3D11CreateDevice，必有错误可上报")
-        })?;
+        let d3d =
+            d3d.ok_or_else(|| last_err.expect("至少尝试过一次 D3D11CreateDevice，必有错误可上报"))?;
 
         let dxgi: IDXGIDevice = d3d.cast()?;
         let d2d: ID2D1Factory =
@@ -145,7 +144,7 @@ mod tests {
 
     #[test]
     fn device_creation_works_or_graceful() {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
         // 应用真实环境：STA COM（RenderDevice::new 内部还需 DispatcherQueue）。
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
@@ -162,12 +161,12 @@ mod tests {
     #[test]
     fn dwrite_text_format_creates_ok() {
         // 定位 CreateTextFormat E_INVALIDARG：单独验证 DWrite 工厂与文本格式创建。
-        use windows::core::PCWSTR;
         use windows::Win32::Graphics::DirectWrite::{
-            DWriteCreateFactory, DWRITE_FACTORY_TYPE_ISOLATED, DWRITE_FONT_STRETCH_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FACTORY_TYPE_ISOLATED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_WEIGHT_NORMAL, DWriteCreateFactory,
         };
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        use windows::core::PCWSTR;
 
         // 应用真实环境：STA COM；locale 必须显式（NULL 会 E_INVALIDARG）
         unsafe {
