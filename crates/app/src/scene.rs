@@ -749,7 +749,6 @@ pub(crate) fn layout_fence(
                 let dock_w = fence.bounds.w.max(icon_size);
                 let start_x = fence.bounds.x + (dock_w - icon_size) / 2.0;
                 let icons = sidebar_icons(
-                    fence,
                     &rows,
                     icon_size,
                     eff_gap,
@@ -774,7 +773,6 @@ pub(crate) fn layout_fence(
                 let h = sidebar_dock_thickness(icon_size, scale);
                 let start_y = fence.bounds.y + (h - icon_size) / 2.0;
                 let icons = sidebar_icons(
-                    fence,
                     &rows,
                     icon_size,
                     eff_gap,
@@ -1009,7 +1007,6 @@ pub(crate) fn sidebar_dock_rect(scale: f32, fence: &Fence, wa: &Rect) -> Rect {
 /// `vertical` = true 时纵向排列（左/右停靠），false 时横向排列（上侧停靠）。
 /// 不处理排序——排序在 build_scene 中用实际渲染位置后处理。
 pub(crate) fn sidebar_icons(
-    _fence: &Fence,
     rows: &[(String, u64, String, String, String)],
     icon_size: f32,
     gap: f32,
