@@ -1,6 +1,6 @@
 # 存储后端抽象
 
-> **状态**：已实现（JSON 后端）；redb 后端待接入。
+> **状态**：已实现（JSON + redb）。默认后端 **redb**，数据位于 **exe 同级 `data/`**。
 > **关联**：[AGENTS.md](../../AGENTS.md) §2.2/§3 · [需求文档](../requirements/desktop-collection.md) §3 · [待开发清单](../roadmap/backlog.md)
 
 ---
@@ -8,10 +8,10 @@
 ## 1. 目标
 
 1. **读写与存储格式解耦**：上层只依赖 `DeskStore`，不关心是 JSON 文件还是 redb 数据库。
-2. **可替换**：新增后端不改业务代码，只加一个实现并在 `store::open` 注册。
-3. **可迁移/可导出**：任意两个后端之间能整库复制快照，用于 JSON → redb 迁移、redb → JSON 备份导出。
+2. **可替换**：新增后端不改业务代码，只加实现并在 `store::open` 注册。
+3. **可迁移/可导出**：任意两个后端之间能整库复制快照（`copy_all`）。
 4. **原子性**：崩溃不能产生半写配置。
-5. **core 无文件 I/O**：契约在 `core`，实现留在 `app`（符合 AGENTS 分层纪律）。
+5. **core 无文件 I/O**：契约在 `core`，实现留在 `app`。
 
 ---
 
@@ -19,15 +19,16 @@
 
 `@text
 core::storage
-├── StoreKind        json | redb（诊断/选择用）
+├── StoreKind        json | redb
 ├── DeskStore        load / save / delete / exists / kind / location
 ├── copy_all         两个后端之间复制快照（迁移/导出入口）
 ├── normalize        版本迁移 + 校验（所有后端加载后必须调用）
-└── MemoryStore      内存实现（测试用，不接触文件系统）
+└── MemoryStore      内存实现（测试用）
 
 app::store
 ├── JsonStore        <data_dir>/desk.json，write temp → rename
-└── open(data_dir)   后端选择（当前默认 JSON；redb 就绪后在此分发）
+├── RedbStore        <data_dir>/sylva.redb，单表多键 + 单 write transaction
+└── open(data_dir)   后端选择 + 一次性 JSON 迁移
 `@
 
 `@rust
@@ -45,54 +46,54 @@ pub trait DeskStore {
 
 - `load` 返回的 `Desk` **必须已归一化**（`normalize` 统一做版本迁移 + 校验），后端不得跳过。
 - `load` 返回 `None` 表示"此后端尚无数据"，由调用方决定默认值（首次运行）。
-- `save` 必须原子；`delete` 用于"重置所有设置"。
+- `save` 必须原子；`delete` 用于"重置所有设置"（redb 实现为清空所有键，不删文件）。
 
 ---
 
-## 3. 新增一个后端要做什么
+## 3. 默认选择与迁移
 
-以 redb 为例：
+`store::open` 的顺序：
 
-1. 在 `crates/app/src/store.rs`（或 `store/redb.rs`）新增 `RedbStore`，实现 `DeskStore`：
-   - `load`：开启读事务，读 meta/version + 各表，组装 `Desk`，调用 `normalize`；
-   - `save`：**单个 write transaction** 写入所有表（见需求文档 §3.3）；
-   - `delete`：删除数据库文件或清空表。
-2. 在 `store::open` 中按 `SYLVA_STORE` 或"文件是否存在"分发。
-3. 补测试：roundtrip、空库、版本迁移、与 JSON 的 `copy_all`。
-4. 更新本文件与 AGENTS 的依赖约束（引入 `redb` 需要显式确认）。
+1. `SYLVA_STORE=json` → 强制 JSON（排查/回退）；
+2. 否则打开 `<data_dir>/sylva.redb`：
+   - 若 redb 为空且存在 `desk.json` → 迁移一次；
+   - 迁移前备份 `desk.json.bak`（已存在不覆盖）；
+   - 写入后**回读比对**，不一致只告警、不删除 `desk.json`；
+3. redb 打不开 → 回退 JSON 并记录错误，保证应用仍可启动。
 
-**redb 草案**
+迁移只在 redb 为空时触发一次；之后 `desk.json` 不再参与读写，可保留作备份或手动删除。
 
-| 项 | 建议 |
+---
+
+## 4. redb 结构
+
+| 项 | 实现 |
 |---|---|
-| 文件 | `<data_dir>/sylva.redb`（与 `desk.json` 并存，迁移完成后再决定是否删除旧文件） |
-| 表 | `meta`（version/schema）、`fences`、`icons`、`todos`、`plugins`、`settings` |
-| 键 | 领域 id（如 fence id、图标路径）序列化为字符串 |
-| 事务 | 一次 `save` = 一个 write transaction |
-| 迁移 | `normalize` 不变；redb 的 schema 版本与 `Desk.version` 分开记录 |
+| 文件 | `<data_dir>/sylva.redb` |
+| 表 | 单表 `desk`：`TableDefinition<&str, &[u8]>` |
+| 键 | `schema` / `version` / `settings` / `fences` / `free_icons` / `icons` / `todos` / `next_todo_id` / `console_open` / `console_pos` / `console_size` / `plugins` / `desktop_mode` |
+| 值 | 对应字段的 JSON 字节（`serde_json::to_vec`） |
+| schema | 后端结构版本 `SCHEMA: u32 = 1`，与 `Desk.version` 独立 |
+| 写入 | 一次 `save` = 一个 write transaction，写全部键 |
+| 读取 | 一个 read transaction 读全部键，反序列化后 `normalize` |
+
+键按字段拆分（而不是整库一个 blob）的好处：后续可做局部读写、按字段迁移；代价是每次 `save` 全量写，当前数据量（百级图标）下可忽略。
 
 ---
 
-## 4. 迁移与导出
+## 5. 迁移与导出
 
 `@text
-JSON → redb :  JsonStore.load() ──copy_all──▶ RedbStore.save()
-redb → JSON :  RedbStore.load() ──copy_all──▶ JsonStore.save()
+JSON → redb :  JsonStore.load() ──copy_all──▶ RedbStore.save()      （启动时自动）
+redb → JSON :  RedbStore.load() ──copy_all──▶ JsonStore.save()      （备份导出）
 备份导出    :  当前后端.load()  ──copy_all──▶ JsonStore(导出目录).save()
 `@
 
-流程要求：
-
-1. 迁移前对旧文件/旧库做一次 `.bak` 备份；
-2. 写入新后端后**回读校验**（`load` 后比较关键字段），校验失败则回滚到旧后端；
-3. 迁移只在启动时做一次，失败不阻断启动（降级到旧后端并记录日志）；
-4. 导出文件采用 `write temp → rename`，导出目录由用户选择。
-
-> `copy_all` 已在 `core::storage` 实现并有测试覆盖（内存 → 内存、空源清空目标）。
+`copy_all` 在 `core::storage` 实现，只依赖 `DeskStore`，不关心两端格式；源为空时清空目标。
 
 ---
 
-## 5. 原子性
+## 6. 原子性
 
 | 后端 | 机制 |
 |---|---|
@@ -102,16 +103,21 @@ redb → JSON :  RedbStore.load() ──copy_all──▶ JsonStore.save()
 
 ---
 
-## 6. 测试现状
+## 7. 测试现状
 
 - `core::storage`：内存 roundtrip、`copy_all` 迁移、空源清空目标。
-- `app::store`：缺失文件返回 `None`、保存/加载 roundtrip、临时文件不残留、删除、JSON → JSON 导出。
-- 全仓库：99 个单测通过，`clippy -D warnings` 与 `fmt --check` 通过。
+- `app::store::json`：缺失文件、roundtrip、临时文件不残留、删除、导出。
+- `app::store::redb_store`：空库、roundtrip、delete、JSON → redb 导入。
+- `app::store`：迁移导入 + 备份、无文件时 no-op。
+- 全仓库 **105 个单测**通过；`clippy -D warnings`、`fmt --check` 通过。
+- 实机验证：全新目录 redb 冷启动；旧 `desk.json` 自动迁移并备份；二次启动不重复迁移；`SYLVA_STORE=json` 回退成功。
 
 ---
 
-## 7. 与需求文档的关系
+## 8. 决策记录
 
-- 需求文档 §3 描述的是**目标状态**（redb + AppData + 事务 + 快照）；本抽象是达成该目标的前置改造。
-- 迁移到 redb 时，`DeskStore` 契约与上层调用保持不变，只替换后端实现。
-- 存储位置（AppData vs exe 同级 `data/`）仍是待确认项，见需求文档附录 A。
+| 日期 | 决策 | 说明 |
+|---|---|---|
+| 2026-11-12 | 存储位置定为 **exe 同级 `data/`** | 与安装器卸载约定一致，不再迁移到 AppData |
+| 2026-11-12 | 默认后端 **redb**，JSON 保留为回退/导入 | `SYLVA_STORE=json` 显式切换 |
+| 2026-11-12 | redb 采用"单表多键 + JSON 值" | 先保证事务与可迁移，按字段拆分留待后续 |

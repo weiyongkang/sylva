@@ -8,6 +8,8 @@ pub enum CoreError {
     Io(#[from] std::io::Error),
     #[error("配置解析错误: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("存储错误: {0}")]
+    Storage(String),
     #[error("壳层错误: {0}")]
     Shell(String),
     #[error("渲染错误: {0}")]

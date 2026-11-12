@@ -18,7 +18,7 @@
 | 外观 | 主题、Per-Monitor V2、BackdropBlur、动画、每栅栏 `tint` |
 | 系统 | 托盘、全局热键、单实例、WARP 兜底、JSON 持久化 |
 | 插件 | 待办插件可用、便签插件预留（仅数据注册，无运行时接口） |
-| 存储抽象 | `DeskStore` 契约 + JSON 后端（原子写）；redb 后端待接入 |
+| 存储 | `DeskStore` 契约 + JSON / redb 双后端；默认 redb，旧 `desk.json` 自动导入并备份 |
 
 ---
 
