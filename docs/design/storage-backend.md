@@ -1,6 +1,6 @@
 # 存储后端抽象
 
-> **状态**：已实现（JSON + redb）。默认后端 **redb**，数据位于 **exe 同级 `data/`**。
+> **状态**：已实现（JSON + redb），并扩展撤销键与快照存储。默认后端 **redb**，数据位于 **exe 同级 `data/`**。
 > **关联**：[AGENTS.md](../../AGENTS.md) §2.2/§3 · [需求文档](../requirements/desktop-collection.md) §3 · [待开发清单](../roadmap/backlog.md)
 
 ---
@@ -38,7 +38,13 @@ pub trait DeskStore {
     fn exists(&self) -> bool;
     fn load(&self) -> Result<Option<Desk>, CoreError>;  // None = 尚无数据
     fn save(&self, desk: &Desk) -> Result<(), CoreError>;
-    fn delete(&self) -> Result<(), CoreError>;
+    fn delete(&self) -> Result<(), CoreError>;         // 同时清空快照
+
+    // 快照（P0-03）：与主 Desk 分离存储，主配置损坏时仍可读取
+    fn save_snapshot(&self, snapshot: &Snapshot) -> Result<(), CoreError>;
+    fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, CoreError>;
+    fn load_snapshot(&self, id: SnapshotId) -> Result<Option<Snapshot>, CoreError>;
+    fn prune_snapshots(&self, keep: usize) -> Result<(), CoreError>;
 }
 `@
 
@@ -71,11 +77,15 @@ pub trait DeskStore {
 |---|---|
 | 文件 | `<data_dir>/sylva.redb` |
 | 表 | 单表 `desk`：`TableDefinition<&str, &[u8]>` |
-| 键 | `schema` / `version` / `settings` / `fences` / `free_icons` / `icons` / `todos` / `next_todo_id` / `console_open` / `console_pos` / `console_size` / `plugins` / `desktop_mode` |
+| 键 | `schema` / `version` / `settings` / `fences` / `free_icons` / `icons` / `todos` / `next_todo_id` / `console_open` / `console_pos` / `console_size` / `plugins` / `desktop_mode` / `undo` |
 | 值 | 对应字段的 JSON 字节（`serde_json::to_vec`） |
-| schema | 后端结构版本 `SCHEMA: u32 = 1`，与 `Desk.version` 独立 |
+| 快照表 | 独立 `snapshots` 表：`u64 -> JSON 字节`；一次快照写入 = 一个 write transaction |
+| schema | 后端结构版本 `SCHEMA: u32 = 2`，与 `Desk.version` 独立；旧库缺 `undo` 键按空栈兼容；`Desk.version=3` 引入 `Fence.kind` |
 | 写入 | 一次 `save` = 一个 write transaction，写全部键 |
 | 读取 | 一个 read transaction 读全部键，反序列化后 `normalize` |
+
+JSON 后端快照位于 `<data_dir>/snapshots/<id>.json`，仍遵循 write temp → rename；
+保留最近 10 份，启动时主配置解析失败则读取最近快照回写。
 
 键按字段拆分（而不是整库一个 blob）的好处：后续可做局部读写、按字段迁移；代价是每次 `save` 全量写，当前数据量（百级图标）下可忽略。
 
@@ -109,7 +119,9 @@ redb → JSON :  RedbStore.load() ──copy_all──▶ JsonStore.save()      
 - `app::store::json`：缺失文件、roundtrip、临时文件不残留、删除、导出。
 - `app::store::redb_store`：空库、roundtrip、delete、JSON → redb 导入。
 - `app::store`：迁移导入 + 备份、无文件时 no-op。
-- 全仓库 **105 个单测**通过；`clippy -D warnings`、`fmt --check` 通过。
+- 全仓库 **137 个单测**通过；`clippy -D warnings`、`fmt --check` 通过。
+- 多栅栏分类：`Desk.version` 升到 3；`Fence.kind` 随 `fences` JSON 存储，无需新增 redb 键。
+- 新增：JSON/redb 快照 roundtrip/prune/delete；redb 旧 schema 缺 `undo` 兼容；撤销队列容量与恢复。
 - 实机验证：全新目录 redb 冷启动；旧 `desk.json` 自动迁移并备份；二次启动不重复迁移；`SYLVA_STORE=json` 回退成功。
 
 ---
@@ -121,3 +133,4 @@ redb → JSON :  RedbStore.load() ──copy_all──▶ JsonStore.save()      
 | 2026-11-12 | 存储位置定为 **exe 同级 `data/`** | 与安装器卸载约定一致，不再迁移到 AppData |
 | 2026-11-12 | 默认后端 **redb**，JSON 保留为回退/导入 | `SYLVA_STORE=json` 显式切换 |
 | 2026-11-12 | redb 采用"单表多键 + JSON 值" | 先保证事务与可迁移，按字段拆分留待后续 |
+| 2026-11-12 | 新增 `undo` 键与独立 `snapshots` 表 | 撤销随主配置单事务；快照独立，主配置损坏仍可回退 |

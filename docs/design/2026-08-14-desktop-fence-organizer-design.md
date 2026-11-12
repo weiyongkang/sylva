@@ -3,6 +3,10 @@
 日期：2026-08-14
 状态：已确认（2026-08-29 按实现现状修订：egui → D2D 内联编辑、UI 收敛为 overlay+控制中心、安装器/MSIX 已落地、模糊走 WinRT Composition）
 
+> 2026-11-12 注：本文中“自动分类”“AppData 存储”“每显示器一个 overlay”等描述已被
+> [需求文档](../requirements/desktop-collection.md) / [AGENTS.md](../../AGENTS.md) / [P0 实施记录](p0-implementation.md)
+> 取代；冲突时以后者为准。
+
 ## 1. 背景与目标
 
 做一个 Windows 桌面图标整理栅栏工具，对标 Stardock Fences，但在**功能和使用体验上全面超越**。目标形态为商业级产品。

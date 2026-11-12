@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use sylva_core::config::normalize;
 use sylva_core::error::CoreError;
 use sylva_core::model::Desk;
+use sylva_core::snapshot::{Snapshot, SnapshotId, SnapshotMeta};
 use sylva_core::storage::{DeskStore, StoreKind};
 
 pub struct JsonStore {
@@ -18,6 +19,14 @@ impl JsonStore {
 
     pub fn desk_path(&self) -> PathBuf {
         self.dir.join("desk.json")
+    }
+
+    pub fn snapshots_dir(&self) -> PathBuf {
+        self.dir.join("snapshots")
+    }
+
+    fn snapshot_path(&self, id: SnapshotId) -> PathBuf {
+        self.snapshots_dir().join(format!("{id}.json"))
     }
 }
 
@@ -59,6 +68,66 @@ impl DeskStore for JsonStore {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        let snapshots = self.snapshots_dir();
+        if snapshots.exists() {
+            std::fs::remove_dir_all(snapshots)?;
+        }
+        Ok(())
+    }
+
+    fn save_snapshot(&self, snapshot: &Snapshot) -> Result<(), CoreError> {
+        let dir = self.snapshots_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = self.snapshot_path(snapshot.id);
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(snapshot)?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, CoreError> {
+        let dir = self.snapshots_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut metas = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            match std::fs::read_to_string(&path)
+                .map_err(CoreError::from)
+                .and_then(|raw| serde_json::from_str::<Snapshot>(&raw).map_err(CoreError::from))
+            {
+                Ok(snapshot) => metas.push(snapshot.meta()),
+                Err(e) => tracing::warn!(path = %path.display(), "读取快照失败，已跳过: {e}"),
+            }
+        }
+        metas.sort_by_key(|m| m.id);
+        Ok(metas)
+    }
+
+    fn load_snapshot(&self, id: SnapshotId) -> Result<Option<Snapshot>, CoreError> {
+        let path = self.snapshot_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&raw)?))
+    }
+
+    fn prune_snapshots(&self, keep: usize) -> Result<(), CoreError> {
+        let metas = self.list_snapshots()?;
+        if metas.len() <= keep {
+            return Ok(());
+        }
+        let excess = metas.len() - keep;
+        for meta in metas.iter().take(excess) {
+            let _ = std::fs::remove_file(self.snapshot_path(meta.id));
+        }
         Ok(())
     }
 }
@@ -94,6 +163,44 @@ mod tests {
         store.save(&desk_with_fence("工作")).unwrap();
         store.delete().unwrap();
         assert!(!store.exists());
+    }
+
+    #[test]
+    fn undo_queue_roundtrip() {
+        let dir = tmp_dir("json-undo");
+        let store = JsonStore::new(dir.clone());
+        let mut desk = desk_with_fence("撤销");
+        desk.undo.push(
+            123,
+            "删除 1 项",
+            sylva_core::history::UndoAction::RestoreSnapshot { snapshot_id: 7 },
+        );
+        store.save(&desk).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.undo.len(), 1);
+        assert_eq!(loaded.undo.entries[0].label, "删除 1 项");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_prune_and_delete() {
+        use sylva_core::snapshot::Snapshot;
+
+        let dir = tmp_dir("json-snapshot");
+        let store = JsonStore::new(dir.clone());
+        for id in 1..=3 {
+            let snapshot = Snapshot::new(id, id, format!("reason{id}"), desk_with_fence("快照"));
+            store.save_snapshot(&snapshot).unwrap();
+        }
+        assert_eq!(store.list_snapshots().unwrap().len(), 3);
+        assert_eq!(store.load_snapshot(2).unwrap().unwrap().reason, "reason2");
+        store.prune_snapshots(1).unwrap();
+        let metas = store.list_snapshots().unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].id, 3);
+        store.delete().unwrap();
+        assert!(store.list_snapshots().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

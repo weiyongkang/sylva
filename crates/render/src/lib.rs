@@ -38,8 +38,8 @@ pub use overlay::{
     RectF, ResizeZone, WM_APP_QUIT, WM_SYLVA_INJECT, run_message_loop,
 };
 pub use scene::{
-    ListColumns, Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow,
-    SceneIcon,
+    ConsolePage, ListColumns, Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail,
+    SceneFenceRow, SceneIcon,
 };
 pub use surface::{CompositionSurface, Frame};
 pub use theme::{GRID_CAPTION_H_MULT, Theme};

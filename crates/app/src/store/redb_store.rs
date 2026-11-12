@@ -5,17 +5,22 @@
 
 use std::path::PathBuf;
 
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use sylva_core::config::normalize;
 use sylva_core::error::CoreError;
 use sylva_core::model::Desk;
+use sylva_core::snapshot::{Snapshot, SnapshotId, SnapshotMeta};
 use sylva_core::storage::{DeskStore, StoreKind};
 
 /// 单表多键：键为字段名，值为该字段的 JSON 字节。
 const TABLE: TableDefinition<'static, &'static str, &'static [u8]> = TableDefinition::new("desk");
 
+/// 快照独立表：键为快照 id，值为 JSON 字节。与主配置分离，主配置损坏时仍可读取。
+const SNAPSHOT_TABLE: TableDefinition<'static, u64, &'static [u8]> =
+    TableDefinition::new("snapshots");
+
 /// 数据库 schema 版本（与 `Desk.version` 独立，用于后端结构迁移）。
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 const K_SCHEMA: &str = "schema";
 const K_VERSION: &str = "version";
@@ -30,6 +35,7 @@ const K_CONSOLE_POS: &str = "console_pos";
 const K_CONSOLE_SIZE: &str = "console_size";
 const K_PLUGINS: &str = "plugins";
 const K_DESKTOP_MODE: &str = "desktop_mode";
+const K_UNDO: &str = "undo";
 
 const ALL_KEYS: &[&str] = &[
     K_SCHEMA,
@@ -45,6 +51,7 @@ const ALL_KEYS: &[&str] = &[
     K_CONSOLE_SIZE,
     K_PLUGINS,
     K_DESKTOP_MODE,
+    K_UNDO,
 ];
 
 pub struct RedbStore {
@@ -125,6 +132,11 @@ impl DeskStore for RedbStore {
             console_size: serde_json::from_slice(&decode(K_CONSOLE_SIZE)?)?,
             plugins: serde_json::from_slice(&decode(K_PLUGINS)?)?,
             desktop_mode: serde_json::from_slice(&decode(K_DESKTOP_MODE)?)?,
+            // 旧 schema 1 没有 undo 键：缺省为空队列，不阻断升级。
+            undo: read(K_UNDO)?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()?
+                .unwrap_or_default(),
         };
         Ok(Some(normalize(desk)))
     }
@@ -144,6 +156,7 @@ impl DeskStore for RedbStore {
             (K_CONSOLE_SIZE, serde_json::to_vec(&desk.console_size)?),
             (K_PLUGINS, serde_json::to_vec(&desk.plugins)?),
             (K_DESKTOP_MODE, serde_json::to_vec(&desk.desktop_mode)?),
+            (K_UNDO, serde_json::to_vec(&desk.undo)?),
         ];
 
         let txn = self
@@ -165,6 +178,7 @@ impl DeskStore for RedbStore {
     }
 
     fn delete(&self) -> Result<(), CoreError> {
+        let snapshot_ids: Vec<u64> = self.list_snapshots()?.into_iter().map(|m| m.id).collect();
         let txn = self
             .db
             .begin_write()
@@ -178,8 +192,102 @@ impl DeskStore for RedbStore {
                     .remove(*key)
                     .map_err(|e| storage_err("redb 删除失败", e))?;
             }
+            let mut snapshots = txn
+                .open_table(SNAPSHOT_TABLE)
+                .map_err(|e| storage_err("redb 打开快照表失败", e))?;
+            for id in snapshot_ids {
+                snapshots
+                    .remove(id)
+                    .map_err(|e| storage_err("redb 删除快照失败", e))?;
+            }
         }
         txn.commit().map_err(|e| storage_err("redb 提交失败", e))?;
+        Ok(())
+    }
+
+    fn save_snapshot(&self, snapshot: &Snapshot) -> Result<(), CoreError> {
+        let bytes = serde_json::to_vec(snapshot)?;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| storage_err("redb 快照写事务失败", e))?;
+        {
+            let mut table = txn
+                .open_table(SNAPSHOT_TABLE)
+                .map_err(|e| storage_err("redb 打开快照表失败", e))?;
+            table
+                .insert(snapshot.id, bytes.as_slice())
+                .map_err(|e| storage_err("redb 写入快照失败", e))?;
+        }
+        txn.commit()
+            .map_err(|e| storage_err("redb 提交快照失败", e))?;
+        Ok(())
+    }
+
+    fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, CoreError> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| storage_err("redb 读事务失败", e))?;
+        let table = match txn.open_table(SNAPSHOT_TABLE) {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut metas = Vec::new();
+        let iter = table
+            .iter()
+            .map_err(|e| storage_err("redb 遍历快照失败", e))?;
+        for item in iter {
+            let (key, value) = item.map_err(|e| storage_err("redb 读取快照失败", e))?;
+            match serde_json::from_slice::<Snapshot>(value.value()) {
+                Ok(snapshot) => metas.push(snapshot.meta()),
+                Err(e) => tracing::warn!(id = key.value(), "redb 快照解析失败，已跳过: {e}"),
+            }
+        }
+        metas.sort_by_key(|m| m.id);
+        Ok(metas)
+    }
+
+    fn load_snapshot(&self, id: SnapshotId) -> Result<Option<Snapshot>, CoreError> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| storage_err("redb 读事务失败", e))?;
+        let table = match txn.open_table(SNAPSHOT_TABLE) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let Some(value) = table
+            .get(id)
+            .map_err(|e| storage_err("redb 读取快照失败", e))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_slice(value.value())?))
+    }
+
+    fn prune_snapshots(&self, keep: usize) -> Result<(), CoreError> {
+        let metas = self.list_snapshots()?;
+        if metas.len() <= keep {
+            return Ok(());
+        }
+        let excess = metas.len() - keep;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| storage_err("redb 快照写事务失败", e))?;
+        {
+            let mut table = txn
+                .open_table(SNAPSHOT_TABLE)
+                .map_err(|e| storage_err("redb 打开快照表失败", e))?;
+            for meta in metas.iter().take(excess) {
+                table
+                    .remove(meta.id)
+                    .map_err(|e| storage_err("redb 删除快照失败", e))?;
+            }
+        }
+        txn.commit()
+            .map_err(|e| storage_err("redb 提交快照失败", e))?;
         Ok(())
     }
 }
@@ -214,6 +322,44 @@ mod tests {
         store.delete().unwrap();
         assert!(!store.exists());
         assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn undo_queue_roundtrip() {
+        let dir = tmp_dir("redb-undo");
+        let store = RedbStore::new(dir.join("sylva.redb")).unwrap();
+        let mut desk = desk_with_fence("撤销");
+        desk.undo.push(
+            123,
+            "删除 1 项",
+            sylva_core::history::UndoAction::RestoreSnapshot { snapshot_id: 7 },
+        );
+        store.save(&desk).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.undo.len(), 1);
+        assert_eq!(loaded.undo.entries[0].label, "删除 1 项");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_prune_and_delete() {
+        use sylva_core::snapshot::Snapshot;
+
+        let dir = tmp_dir("redb-snapshot");
+        let store = RedbStore::new(dir.join("sylva.redb")).unwrap();
+        for id in 1..=3 {
+            let snapshot = Snapshot::new(id, id, format!("reason{id}"), desk_with_fence("快照"));
+            store.save_snapshot(&snapshot).unwrap();
+        }
+        assert_eq!(store.list_snapshots().unwrap().len(), 3);
+        assert_eq!(store.load_snapshot(2).unwrap().unwrap().reason, "reason2");
+        store.prune_snapshots(1).unwrap();
+        let metas = store.list_snapshots().unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].id, 3);
+        store.delete().unwrap();
+        assert!(store.list_snapshots().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

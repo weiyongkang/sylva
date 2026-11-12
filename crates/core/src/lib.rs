@@ -11,13 +11,17 @@
 //! ```
 
 pub mod animation;
+pub mod commands;
 pub mod config;
 pub mod details;
+pub mod drag;
 pub mod error;
 pub mod event;
+pub mod history;
 pub mod layout;
 pub mod magnet;
 pub mod model;
+pub mod snapshot;
 pub mod storage;
 pub mod text;
 

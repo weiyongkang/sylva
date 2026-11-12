@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use crate::config::normalize;
 use crate::error::CoreError;
 use crate::model::Desk;
+use crate::snapshot::{Snapshot, SnapshotId, SnapshotMeta};
 
 /// 存储后端种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +57,19 @@ pub trait DeskStore {
 
     fn save(&self, desk: &Desk) -> Result<(), CoreError>;
 
-    /// 删除后端中的所有数据（"重置所有设置"用）。
+    /// 删除后端中的所有数据（"重置所有设置"用）。快照也应一并清空。
     fn delete(&self) -> Result<(), CoreError>;
+
+    /// 保存一份快照。实现必须原子写入（JSON temp→rename / redb 单 write transaction）。
+    fn save_snapshot(&self, snapshot: &Snapshot) -> Result<(), CoreError>;
+
+    /// 列出快照元数据（按 id 升序）。
+    fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, CoreError>;
+
+    fn load_snapshot(&self, id: SnapshotId) -> Result<Option<Snapshot>, CoreError>;
+
+    /// 只保留最近 `keep` 份快照。
+    fn prune_snapshots(&self, keep: usize) -> Result<(), CoreError>;
 }
 
 /// 把一个后端的完整快照复制到另一个后端。
@@ -81,6 +93,7 @@ pub fn copy_all(from: &dyn DeskStore, to: &dyn DeskStore) -> Result<usize, CoreE
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     inner: RefCell<Option<Desk>>,
+    snapshots: RefCell<Vec<Snapshot>>,
 }
 
 impl MemoryStore {
@@ -91,6 +104,7 @@ impl MemoryStore {
     pub fn with(desk: Desk) -> Self {
         Self {
             inner: RefCell::new(Some(desk)),
+            snapshots: RefCell::new(Vec::new()),
         }
     }
 }
@@ -119,6 +133,39 @@ impl DeskStore for MemoryStore {
 
     fn delete(&self) -> Result<(), CoreError> {
         *self.inner.borrow_mut() = None;
+        self.snapshots.borrow_mut().clear();
+        Ok(())
+    }
+
+    fn save_snapshot(&self, snapshot: &Snapshot) -> Result<(), CoreError> {
+        let mut snapshots = self.snapshots.borrow_mut();
+        if let Some(existing) = snapshots.iter_mut().find(|s| s.id == snapshot.id) {
+            *existing = snapshot.clone();
+        } else {
+            snapshots.push(snapshot.clone());
+        }
+        snapshots.sort_by_key(|s| s.id);
+        Ok(())
+    }
+
+    fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, CoreError> {
+        let mut metas: Vec<SnapshotMeta> =
+            self.snapshots.borrow().iter().map(Snapshot::meta).collect();
+        metas.sort_by_key(|m| m.id);
+        Ok(metas)
+    }
+
+    fn load_snapshot(&self, id: SnapshotId) -> Result<Option<Snapshot>, CoreError> {
+        Ok(self.snapshots.borrow().iter().find(|s| s.id == id).cloned())
+    }
+
+    fn prune_snapshots(&self, keep: usize) -> Result<(), CoreError> {
+        let mut snapshots = self.snapshots.borrow_mut();
+        snapshots.sort_by_key(|s| s.id);
+        if snapshots.len() > keep {
+            let excess = snapshots.len() - keep;
+            snapshots.drain(0..excess);
+        }
         Ok(())
     }
 }
@@ -127,7 +174,7 @@ impl DeskStore for MemoryStore {
 mod tests {
     use super::*;
     use crate::config::AppSettings;
-    use crate::model::{Fence, Rect};
+    use crate::model::{Fence, FenceKind, Rect};
 
     fn desk_with_fence(title: &str) -> Desk {
         let mut desk = Desk::new(AppSettings::default());
@@ -139,9 +186,11 @@ mod tests {
             state: crate::model::FenceState::Expanded,
             icon_ids: Vec::new(),
             appearance: crate::model::FenceAppearance::default(),
+            kind: FenceKind::Manual,
             scroll: 0.0,
             storage_path: None,
             sidebar_collapsed: false,
+            suppressed_paths: Vec::new(),
         });
         desk
     }

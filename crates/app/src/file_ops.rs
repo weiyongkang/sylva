@@ -34,34 +34,73 @@ pub(crate) fn new_path_for_rename(old_path: &str, new_name: &str) -> Option<Path
 /// 「栅栏 → 文件夹」方向：拖入/粘贴的文件落进文件夹而非内部库。源已在目标目录内
 /// （幂等粘贴/跨栅栏移动）直接复用。位图随后在 `handle_event` 末尾随场景上传。
 pub(crate) fn add_paths_to_fence(rt: &mut Runtime, fence: usize, paths: &[String]) {
-    let dest_dir = rt
+    if rt
         .desk
         .fences
         .get(fence)
-        .and_then(|f| f.storage_path.clone())
-        .map(PathBuf::from);
+        .map(|f| f.kind.is_read_only())
+        .unwrap_or(false)
+    {
+        tracing::warn!(fence, "只读镜像栅栏（收件箱/文件夹门户）拒绝拖入");
+        return;
+    }
     for src in paths {
         let src_path = Path::new(src);
-        // 先物理复制进目标目录：栅栏索引的是「目录内副本」，目录/库内删除 → 栅栏项同步删。
-        let target: PathBuf = match &dest_dir {
-            Some(d) if path_within(d, src_path) => src_path.to_path_buf(),
-            Some(d) => match copy_into_dir(src_path, d) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(src, "复制进链接文件夹失败: {e}");
-                    continue;
-                }
-            },
-            None if is_inside_library(rt, src_path) => src_path.to_path_buf(),
-            None => match copy_into_library(rt, src_path) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(src, "复制进库失败: {e}");
-                    continue;
-                }
-            },
-        };
-        register_fence_item(rt, fence, &target.to_string_lossy());
+        // 引用语义（AGENTS §4 / 需求 §2.2）：只登记原路径，不复制、不移动磁盘文件。
+        if !src_path.exists() {
+            tracing::warn!(src, "拖入路径不存在，跳过");
+            continue;
+        }
+        // 用户主动重新加入曾被抑制的路径：解除抑制，允许镜像同步恢复它。
+        let key = src.to_ascii_lowercase();
+        if let Some(f) = rt.desk.fences.get_mut(fence) {
+            f.suppressed_paths.retain(|p| p != &key);
+        }
+        register_fence_item(rt, fence, src);
+        suppress_in_other_mirrors(rt, fence, src);
+    }
+}
+
+/// 从资源管理器/桌面拖入普通栅栏时，同一路径若已被桌面收件箱或文件夹门户镜像，
+/// 在那些镜像栅栏里抑制它，避免同一文件同时出现在收件箱和分类栅栏。
+fn suppress_in_other_mirrors(rt: &mut Runtime, target_fence: usize, path: &str) {
+    let key = path.to_ascii_lowercase();
+    let ids: Vec<String> = rt
+        .desk
+        .icons
+        .iter()
+        .filter(|(_, ic)| {
+            ic.path
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case(path))
+                .unwrap_or(false)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let public_desktop = crate::scene::shell_public_desktop_path().map(PathBuf::from);
+    for (i, fence) in rt.desk.fences.iter_mut().enumerate() {
+        if i == target_fence || !fence.kind.is_mirrored() {
+            continue;
+        }
+        let in_dir = fence
+            .storage_path
+            .as_deref()
+            .map(|dir| {
+                path.eq_ignore_ascii_case(dir) || path_within(Path::new(dir), Path::new(path))
+            })
+            .unwrap_or(false)
+            || (fence.kind == FenceKind::DesktopInbox
+                && public_desktop
+                    .as_ref()
+                    .map(|dir| path_within(dir, Path::new(path)))
+                    .unwrap_or(false));
+        if !in_dir {
+            continue;
+        }
+        if !fence.suppressed_paths.iter().any(|p| p == &key) {
+            fence.suppressed_paths.push(key.clone());
+        }
+        fence.icon_ids.retain(|id| !ids.contains(id));
     }
 }
 
@@ -100,12 +139,23 @@ pub(crate) fn register_fence_item(rt: &mut Runtime, fence: usize, path: &str) ->
         })
         .unwrap_or(false);
     if already {
+        // 同路径项此前可能因文件暂时不可用被标记为失效；路径恢复后清除标记。
+        for ic in rt.desk.icons.values_mut() {
+            if ic
+                .path
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case(path))
+                .unwrap_or(false)
+            {
+                ic.invalid = false;
+            }
+        }
         return false;
     }
-    // 录入元数据：持久化目标目录内路径（重启恢复图标/打开）；added=true 表示受 Sylva 管理
+    // 录入元数据：持久化原路径引用（重启恢复图标/打开）；origin=Collected 表示收集项
     let mut ic = Icon::new(id.clone(), item.display_name.clone(), item.kind);
     ic.path = Some(path.to_string());
-    ic.added = true;
+    ic.mark_collected();
     sylva_core::details::enrich(&mut ic, path);
     rt.desk.icons.insert(id.clone(), ic);
     let new_bitmap = rt.items.len() as u64;
@@ -124,8 +174,9 @@ pub(crate) fn register_fence_item(rt: &mut Runtime, fence: usize, path: &str) ->
     true
 }
 
-/// 更改栅栏的存储位置：将栅栏内所有库内项移动到新目录，更新路径引用。
-/// 桌面枚举项（added=false）不受影响（它们的文件由系统管理）。
+/// 更改栅栏的链接目录：只更新引用关系，不移动任何磁盘文件（AGENTS §4）。
+/// 旧链接目录里的镜像项从栅栏移除引用、文件保留；新目录内容由 reconcile_fences
+/// 在后续同步周期镜像进来。
 pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: &str) {
     let new_path = std::path::Path::new(new_dir);
     if !new_path.is_dir() {
@@ -135,125 +186,40 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
     let Some(fence) = rt.desk.fences.get(fence_idx) else {
         return;
     };
-    let fence_id = fence.id;
-    // 旧链接文件夹：换链接后，旧文件夹里的镜像项不再是本栅栏成员（文件保留在磁盘）
-    let old_dir = fence.storage_path.clone();
-    // 收集需要移动的库内项（added=true 且路径在旧库内）
-    let items_to_move: Vec<String> = fence
-        .icon_ids
-        .iter()
-        .filter(|id| {
-            rt.desk
-                .icons
-                .get(*id)
-                .map(|ic| {
-                    ic.added
-                        && ic
-                            .path
-                            .as_ref()
-                            .map(|p| is_inside_library(rt, std::path::Path::new(p)))
-                            .unwrap_or(false)
-                })
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
-    if items_to_move.is_empty() {
-        // 没有库内项需要移动，直接更新 storage_path
-        if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
-            f.storage_path = Some(new_dir.to_string());
-        }
-        // 换链接：清理旧链接文件夹里的残留镜像项（文件保留在旧文件夹，不删）
-        if let Some(old) = &old_dir {
-            clear_stale_linked_items(rt, fence_idx, old, new_path);
-        }
-        // 链接：把文件夹里已有的文件立即镜像进栅栏（此后增删由后台 SyncLibrary 持续同步）
-        if reconcile_fences(rt) {
-            tracing::info!(fence = fence_id, "链接后新增了文件夹里的栅栏项");
-        }
-        let _ = rt.store.save(&rt.desk);
-        tracing::info!(fence = fence_id, new_dir, "无库内项需移动，仅更新存储路径");
+    if fence.kind == sylva_core::model::FenceKind::DesktopInbox {
+        tracing::warn!("桌面收件箱的目录由系统桌面决定，不能更改");
         return;
     }
-    // 确保目标目录存在
-    let _ = std::fs::create_dir_all(new_path);
-    let mut moved = 0usize;
-    for id in &items_to_move {
-        let old_path_str = match rt.desk.icons.get(id).and_then(|ic| ic.path.clone()) {
-            Some(p) => p,
-            None => continue,
-        };
-        let old_path = std::path::Path::new(&old_path_str);
-        let file_name = match old_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let dest = unique_library_path(new_path, &file_name);
-        // 移动文件/文件夹
-        let move_ok = if old_path.is_dir() {
-            copy_dir_all(old_path, &dest).is_ok()
-        } else {
-            std::fs::copy(old_path, &dest).is_ok()
-        };
-        if !move_ok {
-            tracing::warn!(old_path_str, "移动文件失败");
-            continue;
-        }
-        // 删除旧文件（移动语义）
-        if old_path.is_dir() {
-            let _ = std::fs::remove_dir_all(old_path);
-        } else {
-            let _ = std::fs::remove_file(old_path);
-        }
-        // 更新 Icon.path
-        let new_path_str = dest.to_string_lossy().into_owned();
-        if let Some(ic) = rt.desk.icons.get_mut(id) {
-            ic.path = Some(new_path_str.clone());
-        }
-        // 更新 DesktopItem 路径（用于后续打开/提取图标）
-        if let Some(&idx) = rt.item_index.get(id)
-            && let Some(item) = rt.items.get_mut(idx)
-        {
-            item.path = Some(new_path_str.clone());
-        }
-        moved += 1;
+    if fence.kind == sylva_core::model::FenceKind::Manual && !fence.icon_ids.is_empty() {
+        tracing::warn!("普通栅栏已有成员；请先清空，或新建一个文件夹门户栅栏");
+        return;
     }
-    // 更新栅栏的存储路径
+    if let Err(e) = crate::snapshot::snapshot_before(rt, "更改链接目录") {
+        tracing::warn!("更改链接目录前保存快照失败，取消操作: {e}");
+        return;
+    }
+    let before = rt.desk.clone();
+    let fence_id = fence.id;
+    let old_dir = fence.storage_path.clone();
     if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
+        f.kind = sylva_core::model::FenceKind::FolderPortal;
         f.storage_path = Some(new_dir.to_string());
+        f.suppressed_paths.clear();
     }
-    // 换链接：清理旧链接文件夹里的残留镜像项（文件保留在旧文件夹，不删）
+    // 旧链接目录的残留镜像项只摘引用，文件保留在磁盘。
     if let Some(old) = &old_dir {
         clear_stale_linked_items(rt, fence_idx, old, new_path);
     }
-    // 链接：把文件夹里已有的文件立即镜像进栅栏（此后增删由后台 SyncLibrary 持续同步）
     if reconcile_fences(rt) {
         tracing::info!(fence = fence_id, "链接后新增了文件夹里的栅栏项");
     }
-    let _ = rt.store.save(&rt.desk);
-    // 若旧路径在内部库下且已空，自动删除（避免残留空文件夹）
-    if let Some(old) = &old_dir {
-        let old_path = std::path::Path::new(old);
-        if old_path.is_dir()
-            && old_path.starts_with(&rt.library)
-            && old_path
-                .read_dir()
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(false)
-        {
-            let _ = std::fs::remove_dir(old_path);
-            tracing::info!("已清理空的旧库子文件夹: {}", old);
-        }
-    }
+    crate::persist::commit_or_rollback(rt, before, "更改链接目录");
     tracing::info!(
         fence = fence_id,
         new_dir,
-        moved,
-        total = items_to_move.len(),
-        "栅栏存储位置已更改"
+        "栅栏链接目录已更新（引用语义，未移动磁盘文件）"
     );
 }
-
 /// 换链接后清理旧链接文件夹里的残留镜像项：`added` 项路径在旧文件夹内、
 /// 不在新文件夹内，说明它属于旧链接而非新链接。从栅栏整体摘下（引用删除、
 /// 文件保留在旧文件夹磁盘上，用户仍可从资源管理器访问），使栅栏内容与
@@ -271,7 +237,7 @@ fn clear_stale_linked_items(rt: &mut Runtime, fence_idx: usize, old_dir: &str, n
                         .icons
                         .get(*id)
                         .map(|ic| {
-                            ic.added
+                            ic.is_collected()
                                 && ic
                                     .path
                                     .as_ref()
@@ -297,37 +263,34 @@ fn clear_stale_linked_items(rt: &mut Runtime, fence_idx: usize, old_dir: &str, n
     }
 }
 
-/// 库同步：检查所有内部库项，`library` 里的文件已被外部删除时，栅栏对应项同步移除。
-/// 返回是否有项被移除（调用方可据此决定持久化；重绘由事件尾部统一完成）。
-pub(crate) fn reconcile_library(rt: &mut Runtime) -> bool {
-    let missing: Vec<String> = rt
-        .desk
-        .icons
-        .iter()
-        .filter(|(_, ic)| ic.added)
-        .filter(|(_, ic)| {
-            ic.path
-                .as_ref()
-                .map(|p| is_inside_library(rt, Path::new(p)) && !Path::new(p).exists())
-                .unwrap_or(false)
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
-    let mut changed = false;
-    for id in missing {
-        changed = true;
-        remove_icon_entirely(rt, &id);
+/// 引用同步：检查收集项路径是否仍可用，失效的标记为 `invalid`（不删除引用）。
+/// 需求 §2.4：失效引用降级显示，由用户决定是否移除；不得导致渲染崩溃。
+/// 返回是否有项的 invalid 状态发生变化（调用方可据此持久化）。
+pub(crate) fn reconcile_invalid_refs(rt: &mut Runtime) -> bool {
+    let mut changed = 0usize;
+    for ic in rt.desk.icons.values_mut() {
+        if !ic.is_collected() {
+            continue;
+        }
+        let Some(path) = ic.path.as_deref() else {
+            continue;
+        };
+        let exists = Path::new(path).exists();
+        if ic.invalid == exists {
+            ic.invalid = !exists;
+            changed += 1;
+        }
     }
-    if changed {
-        tracing::info!(removed = changed, "库内文件被删，同步移除栅栏项");
+    if changed > 0 {
+        tracing::info!(changed, "收集项失效状态已同步");
     }
-    changed
+    changed > 0
 }
 
-/// 双向同步总入口：内部库删除同步 + 链接栅栏文件夹镜像。
+/// 双向同步总入口：收集项失效标记 + 链接栅栏文件夹镜像。
 /// 返回是否有任何项被增/删（调用方据此持久化；重绘由事件尾部统一完成）。
 pub(crate) fn reconcile_fences(rt: &mut Runtime) -> bool {
-    let mut changed = reconcile_library(rt);
+    let mut changed = reconcile_invalid_refs(rt);
     for idx in 0..rt.desk.fences.len() {
         if mirror_linked_fence(rt, idx) {
             changed = true;
@@ -343,47 +306,73 @@ pub(crate) fn reconcile_fences(rt: &mut Runtime) -> bool {
 /// 廉价快路径：枚举目录名集合与栅栏内「路径在该目录下」的图标路径集合做比较，
 /// 集合相同立即返回——平时每周期只做一次 `read_dir`，低 CPU；仅差集非空才做
 /// 昂贵的 `DesktopItem` 构建/移除。文件夹不可用（被删/断连）时不动（防御）。
+/// 栅栏的镜像根目录：文件夹门户为 storage_path；桌面收件箱额外包含公共桌面。
+/// Windows 桌面实际显示“用户桌面 + 公共桌面”的合并内容，只读前者会漏快捷方式。
+fn fence_mirror_roots(_rt: &Runtime, fence: &Fence) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(path) = &fence.storage_path {
+        roots.push(PathBuf::from(path));
+    }
+    if fence.kind == FenceKind::DesktopInbox
+        && let Some(public) = crate::scene::shell_public_desktop_path()
+    {
+        let public = PathBuf::from(public);
+        let duplicate = roots.iter().any(|r| {
+            r.to_string_lossy()
+                .eq_ignore_ascii_case(&public.to_string_lossy())
+        });
+        if !duplicate {
+            roots.push(public);
+        }
+    }
+    roots
+}
+
+fn path_under_roots(roots: &[PathBuf], path: &str) -> bool {
+    let path = Path::new(path);
+    roots.iter().any(|root| path_within(root, path))
+}
+
 fn mirror_linked_fence(rt: &mut Runtime, idx: usize) -> bool {
-    let Some(dir) = rt.desk.fences.get(idx).and_then(|f| f.storage_path.clone()) else {
+    let Some(fence) = rt.desk.fences.get(idx).cloned() else {
         return false;
     };
-    let dir = PathBuf::from(dir);
-    if !dir.is_dir() {
+    if !fence.kind.is_mirrored() {
         return false;
     }
-    // 链接 = 双向：先把栅栏里仍留在内部库的旧项物理迁进链接文件夹（栅栏里的东西 →
-    // 文件夹），之后栅栏才真正镜像该文件夹。一次性迁移，完成后路径都在文件夹内，
-    // 之后不再触发。文件已不存在的不迁（交给移除分支处理）。
-    let mut changed = rehome_linked_library_items(rt, idx, &dir);
+    let roots = fence_mirror_roots(rt, &fence);
+    if roots.is_empty() || !roots.iter().any(|r| r.is_dir()) {
+        return false;
+    }
+    // 用户主动移除的路径（抑制列表）：镜像时跳过，避免 4s 同步又加回来。
+    let suppressed: HashSet<String> = fence.suppressed_paths.iter().cloned().collect();
     // 栅栏内「路径在该目录下」的图标路径集合（小写，与磁盘大小写无关）
-    let existing: HashSet<String> = rt
-        .desk
-        .fences
-        .get(idx)
-        .map(|f| {
-            f.icon_ids
-                .iter()
-                .filter_map(|id| rt.desk.icons.get(id).and_then(|ic| ic.path.clone()))
-                .filter(|p| path_within(&dir, Path::new(p)))
-                .map(|p| p.to_ascii_lowercase())
-                .collect()
+    let existing: HashSet<String> = fence
+        .icon_ids
+        .iter()
+        .filter_map(|id| rt.desk.icons.get(id).and_then(|ic| ic.path.clone()))
+        .filter(|p| path_under_roots(&roots, p))
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    // 枚举所有存在的镜像根（跳过隐藏/系统文件，与资源管理器默认一致）。
+    let entries: Vec<PathBuf> = roots
+        .iter()
+        .filter(|root| root.is_dir())
+        .flat_map(|root| {
+            std::fs::read_dir(root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
         })
-        .unwrap_or_default();
-    // 枚举目录（跳过隐藏/系统文件，与资源管理器默认一致）；读取失败视为空 → 走删除分支
-    let entries: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| should_mirror(p))
-                .collect()
-        })
-        .unwrap_or_default();
+        .filter(|p| should_mirror(p))
+        .filter(|p| !suppressed.contains(&p.to_string_lossy().to_ascii_lowercase()))
+        .collect();
     let entry_set: HashSet<String> = entries
         .iter()
         .map(|p| p.to_string_lossy().to_ascii_lowercase())
         .collect();
-    if entry_set == existing {
-        return changed; // 目录内容与栅栏一致 → 无事可做（可能刚迁移过库内项）
-    }
+    let mut changed = entry_set != existing;
     // 文件夹 → 栅栏：新出现的文件/子文件夹注册进栅栏（含改名产生的新路径）
     for p in &entries {
         let lower = p.to_string_lossy().to_ascii_lowercase();
@@ -391,7 +380,7 @@ fn mirror_linked_fence(rt: &mut Runtime, idx: usize) -> bool {
             changed = true;
         }
     }
-    // 栅栏 → 文件夹：路径在该目录下但文件已不存在 → 移除（外部删除/改名）
+    // 栅栏 → 文件夹：路径在该目录下但文件已不存在 → 标记失效引用（不删引用）。
     let ids: Vec<String> = rt
         .desk
         .fences
@@ -402,82 +391,18 @@ fn mirror_linked_fence(rt: &mut Runtime, idx: usize) -> bool {
         let Some(p) = rt.desk.icons.get(&id).and_then(|ic| ic.path.clone()) else {
             continue;
         };
-        if !path_within(&dir, Path::new(&p)) {
+        if !path_under_roots(&roots, &p) {
             continue;
         }
-        if !Path::new(&p).exists() {
-            remove_icon_entirely(rt, &id);
+        if !Path::new(&p).exists()
+            && let Some(ic) = rt.desk.icons.get_mut(&id)
+            && !ic.invalid
+        {
+            ic.invalid = true;
             changed = true;
         }
     }
     changed
-}
-
-/// 链接栅栏的旧库内项迁移：把「路径仍在内部库」的栅栏图标物理移到链接文件夹，
-/// 实现「栅栏里的东西 → 文件夹」。一次性——迁移后路径都在文件夹内不再触发。
-fn rehome_linked_library_items(rt: &mut Runtime, idx: usize, dir: &Path) -> bool {
-    let ids: Vec<String> = rt
-        .desk
-        .fences
-        .get(idx)
-        .map(|f| f.icon_ids.clone())
-        .unwrap_or_default();
-    let mut changed = false;
-    for id in ids {
-        let in_library = rt
-            .desk
-            .icons
-            .get(&id)
-            .and_then(|ic| ic.path.clone())
-            .map(|p| is_inside_library(rt, Path::new(&p)))
-            .unwrap_or(false);
-        if in_library && rehome_item(rt, &id, dir) {
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// 把单个图标对应的磁盘文件从旧路径移动到 `dest_dir`（同名冲突自动改名），
-/// 更新图标/项的路径引用。id（= 小写路径）保持旧值——`register_fence_item` 的
-/// 路径级判重兜底陈旧 id，避免镜像重复添加。返回是否真的移动了。
-fn rehome_item(rt: &mut Runtime, id: &str, dest_dir: &Path) -> bool {
-    let Some(old_path_str) = rt.desk.icons.get(id).and_then(|ic| ic.path.clone()) else {
-        return false;
-    };
-    let old_path = Path::new(&old_path_str);
-    if !old_path.exists() {
-        return false; // 文件已不存在：交给移除分支
-    }
-    let Some(file_name) = old_path.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    let dest = unique_library_path(dest_dir, file_name);
-    let move_ok = if old_path.is_dir() {
-        copy_dir_all(old_path, &dest).is_ok()
-    } else {
-        std::fs::copy(old_path, &dest).is_ok()
-    };
-    if !move_ok {
-        tracing::warn!(old_path_str, "迁移到链接文件夹失败");
-        return false;
-    }
-    if old_path.is_dir() {
-        let _ = std::fs::remove_dir_all(old_path);
-    } else {
-        let _ = std::fs::remove_file(old_path);
-    }
-    let new_path_str = dest.to_string_lossy().into_owned();
-    if let Some(ic) = rt.desk.icons.get_mut(id) {
-        ic.path = Some(new_path_str.clone());
-    }
-    if let Some(&idx) = rt.item_index.get(id)
-        && let Some(item) = rt.items.get_mut(idx)
-    {
-        item.path = Some(new_path_str.clone());
-    }
-    tracing::info!(id, from = %old_path_str, to = %new_path_str, "栅栏库内项已迁移到链接文件夹");
-    true
 }
 
 /// 该路径是否应在栅栏镜像中显示：跳过隐藏/系统文件（与资源管理器默认一致，
@@ -489,23 +414,6 @@ fn should_mirror(path: &Path) -> bool {
         return false;
     }
     attr & (FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0) == 0
-}
-
-/// `path` 是否位于内部库文件夹内（组件级大小写不敏感前缀比较，含边界）。
-pub(crate) fn is_inside_library(rt: &Runtime, path: &Path) -> bool {
-    let lib: Vec<String> = rt
-        .library
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-        .collect();
-    if lib.is_empty() {
-        return false;
-    }
-    let comps: Vec<String> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-        .collect();
-    comps.len() >= lib.len() && lib.iter().zip(comps.iter()).all(|(a, b)| a == b)
 }
 
 /// `path` 是否**严格位于** `root` 目录内（组件级大小写不敏感前缀比较）。
@@ -529,91 +437,14 @@ pub(crate) fn path_within(root: &Path, path: &Path) -> bool {
 pub(crate) fn is_linked_path(rt: &Runtime, path: &str) -> bool {
     let p = Path::new(path);
     rt.desk.fences.iter().any(|f| {
-        f.storage_path
-            .as_ref()
-            .map(|d| path_within(Path::new(d), p))
-            .unwrap_or(false)
+        fence_mirror_roots(rt, f)
+            .iter()
+            .any(|root| path_within(root, p))
     })
 }
 
-/// 是否属于 Sylva 管理区：内部库或任一栅栏的链接存储文件夹。管理区内的文件删除
-/// 会真实删到磁盘（删除/移出动作），管理区外（桌面源文件）只动引用不碰文件。
-pub(crate) fn is_managed_path(rt: &Runtime, path: &Path) -> bool {
-    is_inside_library(rt, path) || is_linked_path(rt, &path.to_string_lossy())
-}
-
-/// 删除 Sylva 管理区内的磁盘文件/文件夹（内部库或链接文件夹）；不在管理区则不碰。
-/// 供「删除」动作使用：管理区内删文件，桌面源文件保留。
-pub(crate) fn delete_managed_file(rt: &Runtime, id: &str) {
-    let Some(p) = rt.desk.icons.get(id).and_then(|ic| ic.path.clone()) else {
-        return;
-    };
-    let pp = Path::new(&p);
-    if !is_managed_path(rt, pp) || !pp.exists() {
-        return;
-    }
-    if pp.is_dir() {
-        let _ = std::fs::remove_dir_all(pp);
-    } else {
-        let _ = std::fs::remove_file(pp);
-    }
-}
-
-/// 把文件/文件夹复制进指定目录；返回目录内目标路径。同名自动改名 `name (1).ext`。
-pub(crate) fn copy_into_dir(src: &Path, dir: &Path) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("item");
-    let dest = unique_library_path(dir, name);
-    if src.is_dir() {
-        copy_dir_all(src, &dest)?;
-    } else {
-        std::fs::copy(src, &dest)?;
-    }
-    Ok(dest)
-}
-
-/// 把文件/文件夹复制进内部库；返回库内目标路径。
-pub(crate) fn copy_into_library(rt: &Runtime, src: &Path) -> std::io::Result<PathBuf> {
-    copy_into_dir(src, &rt.library)
-}
-
-/// 库内不重名路径：存在则 `name (n).ext` 递增。
-pub(crate) fn unique_library_path(lib: &Path, name: &str) -> PathBuf {
-    let cand = lib.join(name);
-    if !cand.exists() {
-        return cand;
-    }
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], &name[i..]),
-        _ => (name, ""),
-    };
-    for i in 1..1000 {
-        let cand = lib.join(format!("{stem} ({i}){ext}"));
-        if !cand.exists() {
-            return cand;
-        }
-    }
-    cand
-}
-
-/// 递归复制目录（不跟符号链接，按常规文件处理）。
-pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
-}
-
-/// 把一个图标从 Sylva 中整体移除（仅删引用，不碰磁盘文件）。
-/// 用于「拖入/粘贴新增项」的移除——它们不属于真实桌面，移出栅栏即删除。
+/// 把一个图标从 Sylva 模型中整体移除（仅删引用，绝不碰磁盘文件）。
+/// 调用方负责先把链接路径写入抑制列表，避免文件夹镜像同步重新加回。
 pub(crate) fn remove_icon_entirely(rt: &mut Runtime, id: &str) {
     rt.desk.icons.remove(id);
     rt.desk.free_icons.retain(|x| x != id);

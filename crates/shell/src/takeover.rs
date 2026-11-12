@@ -64,6 +64,24 @@ impl DesktopHierarchy {
     }
 }
 
+/// 恢复当前桌面图标列表（不发送 WM_SPAWN_WORKERW、不依赖本次进程的探测结果）。
+///
+/// 供独立恢复守卫进程使用：父进程崩溃后，守卫重新查找当前 SHELLDLL_DefView
+/// 下的 SysListView32 并 ShowWindow(SW_SHOW)。Explorer 重启后窗口句柄会变，
+/// 因此不能缓存父进程探测到的 HWND。
+pub fn restore_desktop_icons() -> bool {
+    let Some(def_view) = find_def_view() else {
+        return false;
+    };
+    let Some(list_view) = find_class_child(def_view, CLASS_LISTVIEW) else {
+        return false;
+    };
+    unsafe {
+        let _ = ShowWindow(list_view, SW_SHOW);
+    }
+    true
+}
+
 /// 探测桌面窗口层级。
 ///
 /// 流程：

@@ -193,7 +193,14 @@ impl Compositor {
                 self.icons.insert_at(target, *id, data)?;
             }
             tracing::debug!("present: 位图上传成功 {}", uploads.len());
-            draw_scene(target, &self.theme, scene, &self.icons, &self.formats)?;
+            draw_scene(
+                target,
+                &self.device.d2d,
+                &self.theme,
+                scene,
+                &self.icons,
+                &self.formats,
+            )?;
             tracing::debug!("present: draw_scene 成功");
         }
         frame.finish()?;

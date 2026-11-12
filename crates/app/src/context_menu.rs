@@ -1,14 +1,49 @@
 //! 右键/托盘菜单：菜单构建、动作分发、剪贴板与文件选择。
 
+use crate::history::{capture_fence, record};
 use crate::*;
+use sylva_core::history::UndoAction;
+
 pub(crate) const MENU_ICON_OPEN: usize = 1;
+
+/// “添加栅栏”菜单动作。
+pub(crate) enum AddFenceAction {
+    Blank,
+    LinkedFolder,
+    DesktopInbox,
+}
+
+const MENU_ADD_BLANK: usize = 8300;
+const MENU_ADD_LINKED: usize = 8301;
+const MENU_ADD_INBOX: usize = 8302;
+
+/// 文件夹拖入空白栅栏时的选择。
+pub(crate) enum DropFolderAction {
+    FolderIcon,
+    FolderPortal,
+}
+
+const MENU_DROP_FOLDER_ICON: usize = 8310;
+const MENU_DROP_FOLDER_PORTAL: usize = 8311;
 pub(crate) const MENU_ICON_REMOVE: usize = 2;
 pub(crate) const MENU_PASTE: usize = 2500;
 pub(crate) const MENU_DELETE_FENCE: usize = 5000;
 pub(crate) const MENU_RENAME_FENCE: usize = 6000;
+const MENU_NEW_BLANK_FENCE: usize = 6100;
+const MENU_CHANGE_FENCE_FOLDER: usize = 6101;
+const MENU_DETACH_PORTAL: usize = 6102;
+const MENU_SET_INBOX: usize = 6103;
+const MENU_MANAGE_FENCE: usize = 6104;
+const MENU_SELECT_ALL: usize = 6105;
+const MENU_TOGGLE_HIDDEN: usize = 6106;
+const MENU_TOGGLE_DESKTOP: usize = 6107;
 pub(crate) fn handle_tray_menu(rt: &mut Runtime) {
     const MENU_TRAY_CONSOLE: usize = 8200;
     const MENU_TRAY_QUIT: usize = 8201;
+    const MENU_TRAY_UNDO: usize = 8202;
+    const MENU_TRAY_SNAPSHOT: usize = 8203;
+    const MENU_TRAY_QUICK_HIDE: usize = 8204;
+    const MENU_TRAY_AUTOSTART: usize = 8205;
     let menu = popup_menu();
     if menu.is_invalid() {
         return;
@@ -16,6 +51,33 @@ pub(crate) fn handle_tray_menu(rt: &mut Runtime) {
     unsafe {
         let s = wide("显示 Sylva 控制中心");
         let _ = AppendMenuW(menu, MF_STRING, MENU_TRAY_CONSOLE, PCWSTR(s.as_ptr()));
+        let undo_flags = if crate::history::can_undo(rt) {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
+        let s = wide("撤销上一步删除");
+        let _ = AppendMenuW(menu, undo_flags, MENU_TRAY_UNDO, PCWSTR(s.as_ptr()));
+        let s = wide("恢复上一份快照");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_TRAY_SNAPSHOT, PCWSTR(s.as_ptr()));
+        let s = wide(if rt.quick_hide {
+            "显示所有栅栏（Ctrl+Alt+H）"
+        } else {
+            "隐藏所有栅栏（Ctrl+Alt+H）"
+        });
+        let _ = AppendMenuW(menu, MF_STRING, MENU_TRAY_QUICK_HIDE, PCWSTR(s.as_ptr()));
+        let autostart_flags = if rt.desk.settings.autostart {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let s = wide("开机自启");
+        let _ = AppendMenuW(
+            menu,
+            autostart_flags,
+            MENU_TRAY_AUTOSTART,
+            PCWSTR(s.as_ptr()),
+        );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let s = wide("退出 Sylva");
         let _ = AppendMenuW(menu, MF_STRING, MENU_TRAY_QUIT, PCWSTR(s.as_ptr()));
@@ -37,6 +99,28 @@ pub(crate) fn handle_tray_menu(rt: &mut Runtime) {
         let _ = DestroyMenu(menu);
     }
     match cmd {
+        MENU_TRAY_UNDO => {
+            crate::history::undo_last(rt);
+        }
+        MENU_TRAY_SNAPSHOT => {
+            crate::snapshot::restore_latest(rt);
+        }
+        MENU_TRAY_QUICK_HIDE => {
+            crate::toggle_quick_hide(rt);
+        }
+        MENU_TRAY_AUTOSTART => {
+            let enable = !rt.desk.settings.autostart;
+            match crate::autostart::set_enabled(enable) {
+                Ok(()) => {
+                    rt.desk.settings.autostart = enable;
+                    let _ = rt.store.save(&rt.desk);
+                    tracing::info!(enable, "开机自启已更新");
+                }
+                Err(e) => {
+                    tracing::warn!("开机自启设置失败: {e}");
+                }
+            }
+        }
         MENU_TRAY_CONSOLE => {
             let open = !rt.desk.console_open;
             rt.desk.console_open = open;
@@ -58,8 +142,16 @@ pub(crate) enum IconMenuAction {
 
 /// 栅栏右键菜单动作（精简版：粘贴 / 重命名 / 删除）。
 pub(crate) enum FenceMenuAction {
+    NewBlank,
     Paste,
     Rename,
+    ChangeFolder,
+    DetachPortal,
+    SetInbox,
+    ManageInConsole,
+    SelectAll,
+    ToggleHidden,
+    ToggleDesktop,
     Delete,
 }
 
@@ -71,6 +163,24 @@ pub(crate) fn handle_context_menu(
     _pos: (f32, f32),
 ) {
     let (sx, sy) = cursor_screen();
+    let read_only = rt
+        .desk
+        .fences
+        .get(fence)
+        .map(|f| f.kind == FenceKind::DesktopInbox)
+        .unwrap_or(false);
+    // 桌面收件箱是只读镜像：图标只提供“打开”，不提供删除/重命名/移出，
+    // 避免通过右键修改真实桌面内容。
+    if read_only && let Some(ii) = icon {
+        let key = (fence, ii);
+        if !rt.selected.contains(&key) {
+            rt.selected = vec![key];
+        }
+        if inbox_icon_context_menu(rt.hwnd, sx, sy) {
+            launch_fence_icon(rt, fence, ii);
+        }
+        return;
+    }
     if let Some(ii) = icon {
         // 该项文件路径（打开/删除判定也要用）
         let path = rt
@@ -90,7 +200,7 @@ pub(crate) fn handle_context_menu(
             .get(fence)
             .and_then(|f| f.icon_ids.get(ii))
             .and_then(|id| rt.desk.icons.get(id))
-            .map(|ic| ic.added)
+            .map(|ic| ic.is_collected())
             .unwrap_or(false);
         // 多选集合：右键集合中的任意一项 → 集合操作（打开全部 / 复制 / 移出 / 删除）。
         // 右键未选中的项 → 先单选该项，再走单项逻辑（资源管理器行为）。
@@ -113,11 +223,12 @@ pub(crate) fn handle_context_menu(
         // 退回简版「打开」菜单。Shell 菜单在主线程模态弹出，与 Windows 右键
         // 行为一致；慢扩展已由后台预热（见 shell_menu::show），首次右键不卡死。
         match path {
-            Some(p) => match shell_menu::show(&p, rt.hwnd, sx, sy, managed) {
+            Some(p) => match shell_menu::show(&p, rt.hwnd, sx, sy, managed, rt.desk.desktop_mode) {
                 shell_menu::ShellMenuResult::Remove => remove_fence_icon(rt, fence, ii),
                 shell_menu::ShellMenuResult::Rename => {
                     start_inplace_rename(rt, EditTarget::Item { fence, icon: ii })
                 }
+                shell_menu::ShellMenuResult::ToggleDesktop => crate::toggle_desktop(rt),
                 shell_menu::ShellMenuResult::Invoked => {
                     // 原生动词执行后（如「删除」）：文件若已被移走/删除，立即清掉
                     // 栅栏里的死图标，等价于资源管理器删除后刷新视图。
@@ -156,6 +267,9 @@ pub(crate) fn handle_context_menu(
         }
     } else if let Some(action) = fence_context_menu(rt, fence, sx, sy) {
         match action {
+            FenceMenuAction::NewBlank => {
+                crate::create_blank_fence(rt);
+            }
             FenceMenuAction::Paste => {
                 let paths = clipboard_file_paths();
                 if !paths.is_empty() {
@@ -167,8 +281,92 @@ pub(crate) fn handle_context_menu(
             FenceMenuAction::Rename => {
                 start_inplace_rename(rt, EditTarget::FenceTitle { fence });
             }
+            FenceMenuAction::ChangeFolder => {
+                if let Some(dir) = pick_folder(rt.hwnd) {
+                    change_fence_storage(rt, fence, &dir);
+                }
+            }
+            FenceMenuAction::DetachPortal => {
+                if let Err(e) = crate::snapshot::snapshot_before(rt, "解除文件夹门户") {
+                    tracing::warn!("解除门户前保存快照失败，取消操作: {e}");
+                    return;
+                }
+                let before = rt.desk.clone();
+                if let Some(f) = rt.desk.fences.get_mut(fence) {
+                    f.kind = FenceKind::Manual;
+                    f.storage_path = None;
+                    f.suppressed_paths.clear();
+                }
+                crate::persist::commit_or_rollback(rt, before, "解除文件夹门户");
+            }
+            FenceMenuAction::SetInbox => {
+                let Some(desktop) = crate::scene::shell_desktop_path() else {
+                    tracing::warn!("未找到桌面路径，无法设置收件箱");
+                    return;
+                };
+                if let Err(e) = crate::snapshot::snapshot_before(rt, "设置桌面收件箱") {
+                    tracing::warn!("设置收件箱前保存快照失败，取消操作: {e}");
+                    return;
+                }
+                if rt
+                    .desk
+                    .fences
+                    .iter()
+                    .enumerate()
+                    .any(|(i, f)| i != fence && f.kind == FenceKind::DesktopInbox)
+                {
+                    tracing::warn!("已存在桌面收件箱；请先移除旧收件箱或把它改为普通栅栏");
+                    return;
+                }
+                let before = rt.desk.clone();
+                if let Some(f) = rt.desk.fences.get_mut(fence) {
+                    f.kind = FenceKind::DesktopInbox;
+                    f.storage_path = Some(desktop);
+                    f.suppressed_paths.clear();
+                }
+                if reconcile_fences(rt) {
+                    tracing::info!("桌面收件箱已重新同步");
+                }
+                crate::persist::commit_or_rollback(rt, before, "设置桌面收件箱");
+            }
+            FenceMenuAction::ManageInConsole => {
+                rt.selected_fence = fence;
+                rt.console_page = ConsolePage::Fence;
+                rt.desk.console_open = true;
+                rt.detail_scroll = 0.0;
+                let _ = rt.store.save(&rt.desk);
+                crate::start_panel_tween(rt, 1.0);
+            }
+            FenceMenuAction::SelectAll => {
+                if let Some(f) = rt.desk.fences.get(fence) {
+                    rt.selected = (0..f.icon_ids.len()).map(|i| (fence, i)).collect();
+                }
+            }
+            FenceMenuAction::ToggleHidden => {
+                if let Some(f) = rt.desk.fences.get_mut(fence) {
+                    f.appearance.hidden = !f.appearance.hidden;
+                }
+                let _ = rt.store.save(&rt.desk);
+            }
+            FenceMenuAction::ToggleDesktop => crate::toggle_desktop(rt),
             FenceMenuAction::Delete => {
-                // 删除栅栏，不删除链接的文件夹（用户数据不受影响）
+                // 删除栅栏，不删除链接的文件夹/磁盘文件（用户数据不受影响）
+                if let Err(e) = crate::snapshot::snapshot_before(rt, "删除栅栏") {
+                    tracing::warn!("删除栅栏前保存快照失败，取消操作: {e}");
+                    return;
+                }
+                let before = rt.desk.clone();
+                if let Some((fence_snapshot, index, items)) = capture_fence(rt, fence) {
+                    record(
+                        rt,
+                        "删除栅栏",
+                        UndoAction::RestoreFence {
+                            fence: Box::new(fence_snapshot),
+                            index,
+                            items,
+                        },
+                    );
+                }
                 let ids: Vec<String> = rt
                     .desk
                     .fences
@@ -181,10 +379,38 @@ pub(crate) fn handle_context_menu(
                 if fence < rt.desk.fences.len() {
                     rt.desk.fences.remove(fence);
                 }
-                let _ = rt.store.save(&rt.desk);
+                crate::persist::commit_or_rollback(rt, before, "删除栅栏");
             }
         }
     }
+}
+
+/// 桌面收件箱图标菜单：只读，仅允许打开。
+pub(crate) fn inbox_icon_context_menu(hwnd: HWND, sx: i32, sy: i32) -> bool {
+    let menu = popup_menu();
+    if menu.is_invalid() {
+        return false;
+    }
+    unsafe {
+        let s = wide("打开");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ICON_OPEN, PCWSTR(s.as_ptr()));
+    }
+    let cmd = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY,
+            sx,
+            sy,
+            Some(0),
+            hwnd,
+            None,
+        )
+        .0 as usize
+    };
+    unsafe {
+        let _ = DestroyMenu(menu);
+    }
+    cmd == MENU_ICON_OPEN
 }
 
 /// 图标右键菜单（简版回退）：打开 / 移出栅栏（Sylva 管理项不提供移出，见 `handle_context_menu`）。
@@ -386,20 +612,67 @@ pub(crate) fn pick_folder(owner: HWND) -> Option<String> {
 /// 栅栏右键菜单：粘贴 / 重命名 / 删除（精简版）。
 pub(crate) fn fence_context_menu(
     rt: &mut Runtime,
-    _fence: usize,
+    fence: usize,
     sx: i32,
     sy: i32,
 ) -> Option<FenceMenuAction> {
     let hwnd = rt.hwnd;
+    let kind = rt
+        .desk
+        .fences
+        .get(fence)
+        .map(|f| f.kind)
+        .unwrap_or_default();
     let main = popup_menu();
     if main.is_invalid() {
         return None;
     }
     unsafe {
-        let s = wide("粘贴文件");
-        let _ = AppendMenuW(main, MF_STRING, MENU_PASTE, PCWSTR(s.as_ptr()));
+        let s = wide("新建空白栅栏");
+        let _ = AppendMenuW(main, MF_STRING, MENU_NEW_BLANK_FENCE, PCWSTR(s.as_ptr()));
+        if !kind.is_read_only() {
+            let s = wide("粘贴文件");
+            let _ = AppendMenuW(main, MF_STRING, MENU_PASTE, PCWSTR(s.as_ptr()));
+        }
         let s = wide("重命名栅栏");
         let _ = AppendMenuW(main, MF_STRING, MENU_RENAME_FENCE, PCWSTR(s.as_ptr()));
+        let s = wide("在控制中心管理此栅栏");
+        let _ = AppendMenuW(main, MF_STRING, MENU_MANAGE_FENCE, PCWSTR(s.as_ptr()));
+        let s = wide("选择全部项目");
+        let _ = AppendMenuW(main, MF_STRING, MENU_SELECT_ALL, PCWSTR(s.as_ptr()));
+        let hidden = rt
+            .desk
+            .fences
+            .get(fence)
+            .map(|f| f.appearance.hidden)
+            .unwrap_or(false);
+        let s = wide(if hidden {
+            "显示此栅栏"
+        } else {
+            "隐藏此栅栏"
+        });
+        let _ = AppendMenuW(main, MF_STRING, MENU_TOGGLE_HIDDEN, PCWSTR(s.as_ptr()));
+        let s = wide(if rt.desk.desktop_mode {
+            "切换回栅栏桌面"
+        } else {
+            "切换到原始桌面"
+        });
+        let _ = AppendMenuW(main, MF_STRING, MENU_TOGGLE_DESKTOP, PCWSTR(s.as_ptr()));
+        let _ = AppendMenuW(main, MF_SEPARATOR, 0, PCWSTR::null());
+        if kind == FenceKind::FolderPortal {
+            let s = wide("更改文件夹…");
+            let _ = AppendMenuW(
+                main,
+                MF_STRING,
+                MENU_CHANGE_FENCE_FOLDER,
+                PCWSTR(s.as_ptr()),
+            );
+            let s = wide("解除门户（保留当前引用）");
+            let _ = AppendMenuW(main, MF_STRING, MENU_DETACH_PORTAL, PCWSTR(s.as_ptr()));
+        } else if kind == FenceKind::Manual {
+            let s = wide("设为桌面收件箱");
+            let _ = AppendMenuW(main, MF_STRING, MENU_SET_INBOX, PCWSTR(s.as_ptr()));
+        }
         let _ = AppendMenuW(main, MF_SEPARATOR, 0, PCWSTR::null());
         let s = wide("删除栅栏");
         let _ = AppendMenuW(main, MF_STRING, MENU_DELETE_FENCE, PCWSTR(s.as_ptr()));
@@ -420,9 +693,90 @@ pub(crate) fn fence_context_menu(
         let _ = DestroyMenu(main);
     }
     match cmd {
+        MENU_NEW_BLANK_FENCE => Some(FenceMenuAction::NewBlank),
         MENU_PASTE => Some(FenceMenuAction::Paste),
         MENU_RENAME_FENCE => Some(FenceMenuAction::Rename),
+        MENU_CHANGE_FENCE_FOLDER => Some(FenceMenuAction::ChangeFolder),
+        MENU_DETACH_PORTAL => Some(FenceMenuAction::DetachPortal),
+        MENU_SET_INBOX => Some(FenceMenuAction::SetInbox),
+        MENU_MANAGE_FENCE => Some(FenceMenuAction::ManageInConsole),
+        MENU_SELECT_ALL => Some(FenceMenuAction::SelectAll),
+        MENU_TOGGLE_HIDDEN => Some(FenceMenuAction::ToggleHidden),
+        MENU_TOGGLE_DESKTOP => Some(FenceMenuAction::ToggleDesktop),
         MENU_DELETE_FENCE => Some(FenceMenuAction::Delete),
+        _ => None,
+    }
+}
+
+/// 文件夹拖入空白栅栏后的选择菜单。
+pub(crate) fn drop_folder_menu(hwnd: HWND) -> Option<DropFolderAction> {
+    let menu = popup_menu();
+    if menu.is_invalid() {
+        return None;
+    }
+    unsafe {
+        let s = wide("添加为文件夹图标");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_DROP_FOLDER_ICON, PCWSTR(s.as_ptr()));
+        let s = wide("链接为文件夹门户（只读镜像）");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_DROP_FOLDER_PORTAL, PCWSTR(s.as_ptr()));
+    }
+    let (sx, sy) = crate::cursor_screen();
+    let cmd = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY,
+            sx,
+            sy,
+            Some(0),
+            hwnd,
+            None,
+        )
+        .0 as usize
+    };
+    unsafe {
+        let _ = DestroyMenu(menu);
+    }
+    match cmd {
+        MENU_DROP_FOLDER_ICON => Some(DropFolderAction::FolderIcon),
+        MENU_DROP_FOLDER_PORTAL => Some(DropFolderAction::FolderPortal),
+        _ => None,
+    }
+}
+
+/// “添加栅栏”菜单：空白栅栏 / 链接文件夹。
+pub(crate) fn add_fence_menu(hwnd: HWND) -> Option<AddFenceAction> {
+    let menu = popup_menu();
+    if menu.is_invalid() {
+        return None;
+    }
+    unsafe {
+        let s = wide("空白栅栏");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ADD_BLANK, PCWSTR(s.as_ptr()));
+        let s = wide("链接文件夹…");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ADD_LINKED, PCWSTR(s.as_ptr()));
+        let s = wide("桌面收件箱");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ADD_INBOX, PCWSTR(s.as_ptr()));
+    }
+    let (sx, sy) = crate::cursor_screen();
+    let cmd = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY,
+            sx,
+            sy,
+            Some(0),
+            hwnd,
+            None,
+        )
+        .0 as usize
+    };
+    unsafe {
+        let _ = DestroyMenu(menu);
+    }
+    match cmd {
+        MENU_ADD_BLANK => Some(AddFenceAction::Blank),
+        MENU_ADD_LINKED => Some(AddFenceAction::LinkedFolder),
+        MENU_ADD_INBOX => Some(AddFenceAction::DesktopInbox),
         _ => None,
     }
 }

@@ -10,6 +10,7 @@
 //! 本 crate 是分层架构中最贴近系统的一层，API 以 `sylva-core` 的领域类型为边界。
 
 pub mod com;
+pub mod drag;
 pub mod icons;
 pub mod items;
 pub mod takeover;

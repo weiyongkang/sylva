@@ -106,8 +106,10 @@ pub(crate) mod test_util {
             icon_ids: Vec::new(),
             appearance: sylva_core::model::FenceAppearance::default(),
             scroll: 0.0,
+            kind: sylva_core::model::FenceKind::Manual,
             storage_path: None,
             sidebar_collapsed: false,
+            suppressed_paths: Vec::new(),
         });
         desk
     }

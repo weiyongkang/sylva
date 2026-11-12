@@ -2,7 +2,7 @@
 //!
 //! 坐标全部为**物理像素**（虚拟屏幕坐标），与 overlay 窗口客户端坐标一致。
 
-use sylva_core::model::{FenceLayout, FenceStyle, SidebarPosition};
+use sylva_core::model::{FenceLayout, FenceStyle, HoverEffect, IconShape, SidebarPosition};
 
 use crate::overlay::{ConsoleZone, RectF};
 
@@ -23,6 +23,10 @@ pub struct SceneIcon {
     pub col_size: String,
     /// 悬停缩放 1.0=常态，>1 = 放大中（App 层按 hover 补间填值，绘制时以中心放大）。
     pub scale: f32,
+    /// 路径失效（文件被外部删除/移动）：降透明度显示，双击不打开。
+    pub invalid: bool,
+    /// OLE 拖出进行中：原位降透明度显示（拖放源视觉反馈）。
+    pub dragging: bool,
 }
 
 /// 列表布局的详情列位置（绝对虚拟屏幕 x；名称列紧贴图标右侧，不入列）。
@@ -43,6 +47,18 @@ pub struct SceneFence {
     pub width: f32,
     pub height: f32,
     pub title: String,
+    /// 是否显示标题文字（false 时标题栏仍是拖动把手）。
+    pub show_title: bool,
+    /// 是否显示图标名称标签。
+    pub show_labels: bool,
+    /// 图标形状：方角 / 圆角 / 圆形。
+    pub icon_shape: IconShape,
+    /// 图标悬停效果。
+    pub hover_effect: HoverEffect,
+    /// 用户是否隐藏该栅栏。
+    pub hidden: bool,
+    /// 控制中心当前选中的栅栏：绘制高对比边框。
+    pub console_selected: bool,
     pub icons: Vec<SceneIcon>,
     /// 布局格式：网格 / 列表。
     pub layout: FenceLayout,
@@ -95,6 +111,16 @@ pub struct ReorderDrag {
     pub cursor_y: f32,
 }
 
+/// 控制中心右侧内容页。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsolePage {
+    /// 系统控制：桌面切换、快速隐藏、开机自启。
+    #[default]
+    System,
+    /// 当前选中栅栏的布局/外观设置。
+    Fence,
+}
+
 impl SceneFence {
     /// 点是否落在栅栏矩形内（命中测试用）。
     pub fn contains(&self, px: f32, py: f32) -> bool {
@@ -143,6 +169,8 @@ pub struct SceneFenceRow {
 pub struct SceneFenceDetail {
     pub rect: RectF,
     pub title: String,
+    /// 栅栏重命名按钮。
+    pub rename_btn: RectF,
     /// 当前值（绘制时高亮对应分段按钮 / 色板项）。
     pub layout: FenceLayout,
     pub icon_size: f32,
@@ -172,6 +200,41 @@ pub struct SceneFenceDetail {
     pub sidebar_left: RectF,
     pub sidebar_top: RectF,
     pub sidebar_right: RectF,
+    /// 标题/名称标签显示开关。
+    pub show_title: bool,
+    pub show_labels: bool,
+    pub title_toggle: RectF,
+    pub labels_toggle: RectF,
+    /// 网格固定列/行数（0 = 自动）。
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    pub cols_minus: RectF,
+    pub cols_plus: RectF,
+    pub rows_minus: RectF,
+    pub rows_plus: RectF,
+    /// 网格选择器：8×8 个 32px 小格；点选第 (col,row) 格 = 列数/行数。
+    pub grid_picker: RectF,
+    pub grid_picker_cell: f32,
+    /// 背景填充不透明度快捷档位。
+    pub fill_opacity: f32,
+    /// 透明度滑轨（整条）与 21 个点击分段（0..100%，5% 一步）。
+    pub opacity_track: RectF,
+    pub opacity_steps: Vec<RectF>,
+    /// 图标形状：方角 / 圆角 / 圆形。
+    pub icon_shape: IconShape,
+    pub shape_square: RectF,
+    pub shape_rounded: RectF,
+    pub shape_circle: RectF,
+    /// 悬停效果：关闭 / 高亮 / 放大。
+    pub hover_effect: HoverEffect,
+    pub hover_none: RectF,
+    pub hover_highlight: RectF,
+    pub hover_scale: RectF,
+    /// 是否渲染该栅栏。
+    pub hidden: bool,
+    pub visibility_toggle: RectF,
+    /// 自定义色调（系统颜色选择器）。
+    pub custom_color: RectF,
 }
 
 /// 控制台面板（控制中心：栅栏管理）。
@@ -180,6 +243,12 @@ pub struct SceneFenceDetail {
 /// 保证点击区域与视觉一致。
 #[derive(Debug, Clone)]
 pub struct SceneConsole {
+    /// 左侧导航：系统控制行。
+    pub system_nav: RectF,
+    /// 当前右侧内容页。
+    pub page: ConsolePage,
+    /// 当前选中的栅栏下标（导航高亮/详情）。
+    pub selected_fence: usize,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -190,12 +259,21 @@ pub struct SceneConsole {
     pub close: RectF,
     /// 「切换桌面」按钮矩形（标题栏，关闭按钮左侧）。
     pub desktop_toggle: RectF,
+    /// 系统控制页：切换桌面 / 快速隐藏 / 开机自启。
+    pub system_desktop: RectF,
+    pub system_quick_hide: RectF,
+    pub system_autostart: RectF,
+    pub system_overlap: RectF,
+    pub system_reset_size: RectF,
     /// 栅栏管理页：可点选栅栏行（与 `desk.fences` 平行）。
     pub fence_rows: Vec<SceneFenceRow>,
     /// 栅栏管理页：列表可视区（行超出部分被裁剪，命中模型据此跳过不可见行）。
     pub fence_list_view: RectF,
     /// 栅栏管理页：选中栅栏的详情控制区。
     pub fence_detail: Option<SceneFenceDetail>,
+    /// 右侧详情的可视裁剪区与可滚动范围。
+    pub detail_view: RectF,
+    pub detail_scroll_max: f32,
     /// 栅栏管理页：「添加栅栏」按钮。
     pub add_fence: RectF,
     /// 栅栏管理页：「删除栅栏」按钮（添加按钮下方）。
@@ -206,8 +284,12 @@ pub struct SceneConsole {
     pub panel: f32,
     /// 当前悬停的控制台控件（App 层经 ConsoleHover 事件写入；绘制高亮用）。
     pub hover_zone: Option<ConsoleZone>,
-    /// 是否处于原始桌面模式（标题栏按钮文案与状态）。
+    /// 是否处于原始桌面模式（系统控制按钮文案与状态）。
     pub desktop_mode: bool,
+    /// 开机自启当前设置（系统控制按钮状态）。
+    pub autostart: bool,
+    /// 是否允许栅栏叠加。
+    pub fence_overlap: bool,
 }
 
 /// 内联文本编辑的渲染数据（App 层 InlineEdit 的只读快照，绘制用）。
@@ -301,6 +383,12 @@ mod tests {
             width: 100.0,
             height: 80.0,
             title: "测试".into(),
+            show_title: true,
+            show_labels: true,
+            icon_shape: IconShape::Square,
+            hover_effect: HoverEffect::Scale,
+            hidden: false,
+            console_selected: false,
             icons: vec![],
             layout: FenceLayout::Grid,
             list_cols: None,

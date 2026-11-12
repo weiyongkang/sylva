@@ -31,30 +31,31 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, ReleaseCapture, SetCapture,
-    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_F10,
+    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_F10, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP, NIF_ICON, NIF_MESSAGE,
-    NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HCURSOR, HICON, HTCLIENT, HTTRANSPARENT, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer,
-    LoadCursorW, LoadIconW, MSG, PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetCursor,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
-    WM_ERASEBKGND, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CS_DBLCLKS, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GWLP_USERDATA, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetParent,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId, HC_ACTION, HCURSOR, HHOOK,
+    HICON, HTCLIENT, HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer, LoadCursorW, LoadIconW, MSG, MSLLHOOKSTRUCT,
+    PostMessageW, PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_QUERYENDSESSION,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
 };
 use windows::core::{PCWSTR, Result};
 
+use sylva_core::drag::DropEffect;
 use sylva_core::model::{FenceLayout, FenceStyle, SidebarPosition};
 
 /// 窗口类名（全局唯一，单实例）。
@@ -74,6 +75,9 @@ pub const WM_SYLVA_INJECT: u32 = 0x8000 + 2;
 /// 托盘图标回调消息（WM_APP + 3）：`lParam` 为托盘鼠标消息（WM_RBUTTONUP 等）。
 pub const WM_TRAY: u32 = 0x8000 + 3;
 
+/// 低层鼠标钩子捕获到“桌面空白处右键”（WM_APP + 4）：App 弹出新建栅栏菜单。
+pub const WM_SYLVA_DESKTOP_MENU: u32 = 0x8000 + 4;
+
 /// 托盘图标 ID（进程内唯一）。
 const TRAY_ID: u32 = 1;
 
@@ -83,6 +87,8 @@ const QUIT_HOTKEY_ID: i32 = 1;
 
 /// 控制台（插件面板）开关热键：Ctrl+Alt+T。
 const CONSOLE_HOTKEY_ID: i32 = 2;
+/// Quick hide 热键：Ctrl+Alt+H。
+const QUICK_HIDE_HOTKEY_ID: i32 = 3;
 
 /// 库同步定时器 ID：周期触发 `SyncLibrary`，App 检查库文件夹中已被外部删除的
 /// 文件，同步移除栅栏对应项（「库内删除 → 栅栏项消失」）。
@@ -96,6 +102,11 @@ const ANIM_TIMER: usize = 0x5312;
 /// 动画帧间隔（毫秒，≈60fps）。
 const ANIM_MS: u32 = 16;
 
+/// 图标拖出到桌面/资源管理器前的延迟定时器：给跨栅栏分类留出穿过空隙的时间。
+const DRAG_OUT_TIMER: usize = 0x5313;
+/// 延迟时长（毫秒）；按住 Shift 可立即拖出。
+const DRAG_OUT_DELAY_MS: u32 = 400;
+
 /// 右下角缩放手柄尺寸（物理像素）。App 层用同样数值生成手柄命中区域。
 pub const GRIP_SIZE: f32 = 26.0;
 /// 左/右/下边缘的缩放松动距离（物理像素），拖边缘即可改宽/改高。
@@ -107,10 +118,14 @@ pub const CORNER_RESIZE: f32 = 12.0;
 pub const CLICK_DRAG_THRESHOLD: f32 = 5.0;
 /// 侧边栏图标拖动排序的启动阈值（像素）：按下后移动超过此距离才进入 reorder 模式。
 const REORDER_THRESHOLD: f32 = 8.0;
+/// 栅栏内图标拖出（OLE 拖放）的启动阈值（像素）。
+const DRAG_OUT_THRESHOLD: f32 = 6.0;
 
 /// 类只注册一次（同一 HINSTANCE）。
 static CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 static PROXY_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
+/// 低层鼠标钩子回调需要找回当前 overlay 窗口（单实例）。
+static DESKTOP_HOOK_HWND: OnceLock<isize> = OnceLock::new();
 
 /// 矩形（虚拟屏幕坐标，物理像素）。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -141,6 +156,10 @@ pub struct FenceHit {
     pub tooltip: Option<RectF>,
     /// 是否为侧边栏布局（用于拖动排序判定）。
     pub is_sidebar: bool,
+    /// 是否显示标题文字；false 时标题命中高度为 0，空白拖动用于移动栅栏。
+    pub show_title: bool,
+    /// 是否接受图标拖入（文件夹门户为只读镜像，false）。
+    pub accepts_drop: bool,
 }
 
 /// 一个图标的命中数据。`fence` / `icon` 分别是 App 层 `desk.fences` 下标
@@ -159,18 +178,48 @@ pub enum ConsoleZone {
     Close,
     /// 点击折叠胶囊 / 空白：展开面板。
     Expand,
-    /// 切换到第 `index` 个标签页。
-    Tab(usize),
     /// 标题栏「切换桌面」按钮：栅栏 ⇄ 原始桌面。
     DesktopToggle,
+    /// 左侧导航「系统控制」。
+    NavSystem,
     /// 栅栏管理页：选中第 `index` 个栅栏显示详情控制。
     FenceSelect(usize),
+    /// 系统控制：快速隐藏全部栅栏。
+    QuickHide,
+    /// 系统控制：切换开机自启。
+    ToggleAutostart,
+    /// 系统控制：允许/禁止栅栏相互叠加。
+    ToggleFenceOverlap,
+    /// 系统控制：重置控制中心为屏幕 1/3 默认尺寸。
+    ResetConsoleSize,
     FenceLayout(FenceLayout),
     FenceIconSize(f32),
     FenceStyle(FenceStyle),
     /// 栅栏管理页：设置侧边栏停靠位置（仅 Sidebar 布局有效）。
     FenceSidebarPos(SidebarPosition),
     FenceTint(Option<[f32; 3]>),
+    /// 是否显示标题文字。
+    FenceShowTitle(bool),
+    /// 是否显示图标名称。
+    FenceShowLabels(bool),
+    /// 图标显示形状：方角 / 圆角 / 圆形。
+    FenceIconShape(sylva_core::model::IconShape),
+    /// 图标悬停效果：关闭 / 高亮 / 放大。
+    FenceHoverEffect(sylva_core::model::HoverEffect),
+    /// 网格选择器：选择第 (列, 行) 个 32px 小格。
+    GridPicker(u32, u32),
+    /// 是否渲染该栅栏（true = 显示）。
+    FenceHidden(bool),
+    /// 重命名当前选中的栅栏。
+    RenameFence,
+    /// 网格列数增量（±1；0 = 自动）。
+    FenceGridCols(i32),
+    /// 网格可见行数增量（±1；0 = 自动）。
+    FenceGridRows(i32),
+    /// 背景填充不透明度档位。
+    FenceOpacity(f32),
+    /// 打开系统颜色选择器自定义色调。
+    FenceCustomColor,
     /// 栅栏管理页：「添加栅栏」按钮（新建一个空白栅栏并选中）。
     AddFence,
     /// 栅栏管理页：移出当前选中的栅栏。
@@ -201,6 +250,13 @@ pub struct HitModel {
     /// 当前内联编辑框矩形（浮于栅栏之上）：点击内部用于定位光标，不再落到
     /// 下面的栅栏/图标（否则会误触发「点击别处提交编辑」）。
     pub edit_rect: Option<RectF>,
+}
+
+impl HitModel {
+    /// 是否没有任何可交互/可绘制内容（空区域判定用）。
+    pub fn is_empty(&self) -> bool {
+        self.fences.is_empty() && self.console.is_none() && self.edit_rect.is_none()
+    }
 }
 
 /// 缩放拖拽所作用的栅栏区域（决定改宽 / 改高 / 是否随动左上角）。
@@ -242,6 +298,24 @@ pub enum OverlayEvent {
         icon: usize,
         ctrl: bool,
     },
+    /// 图标被拖出栅栏（位移超过阈值）：App 解析路径并调用 OLE `SHDoDragDrop`。
+    IconDragOut { fence: usize, icon: usize },
+    /// 跨栅栏分类拖拽中：目标栅栏（None = 当前不在任何其他栅栏上）。
+    IconClassifyDrag {
+        from: usize,
+        icon: usize,
+        to: Option<usize>,
+        ctrl: bool,
+    },
+    /// 跨栅栏分类释放：App 执行移动/复制；门户目标由 App 拒绝。
+    IconClassifyDrop {
+        from: usize,
+        icon: usize,
+        to: usize,
+        ctrl: bool,
+    },
+    /// 分类拖拽取消（离开目标/释放到空白）。
+    IconClassifyCancel,
     /// 框选拖拽（橡皮筋）：`rect` 是当前框选矩形，`selected` 是框中的图标（拖动中逐帧上报）。
     SelectDrag {
         fence: usize,
@@ -272,8 +346,19 @@ pub enum OverlayEvent {
     CursorMove { x: f32, y: f32 },
     /// 光标离开窗口（`WM_MOUSELEAVE`）：App 层清除 Dock 放大（恢复 1.0）。
     CursorLeave,
-    /// 文件被拖入某个栅栏（`WM_DROPFILES`）：App 把这些路径加进该栅栏。
-    FilesDropped { fence: usize, paths: Vec<String> },
+    /// 文件被拖入某个栅栏（OLE `IDropTarget`）：App 把这些路径加进该栅栏。
+    FilesDropped {
+        fence: usize,
+        paths: Vec<String>,
+        effect: DropEffect,
+    },
+    /// OLE 拖放悬停：目标栅栏与当前放置效果（None = 光标不在栅栏/数据不支持）。
+    DragHover {
+        fence: Option<usize>,
+        effect: DropEffect,
+    },
+    /// OLE 拖放离开窗口：清除悬停高亮。
+    DragLeave,
     /// 鼠标滚轮滚动某栅栏：`delta` 是滚轮原始刻度（正=向上/远离，负=向下）。
     FenceScroll { fence: usize, delta: i32 },
     /// 托盘图标：右键（显示控制中心/退出菜单）。
@@ -284,6 +369,10 @@ pub enum OverlayEvent {
     ConsoleHover { zone: Option<ConsoleZone> },
     /// 控制台（插件面板）内点击某个控件。
     ConsoleClick { zone: ConsoleZone },
+    /// 控制中心滑轨/网格拖动中的控件更新。
+    ConsoleControlDrag { zone: ConsoleZone },
+    /// 控制中心滑轨/网格拖动结束（持久化一次）。
+    ConsoleControlDragEnd,
     /// 在控制台面板上滚动滚轮（待办列表滚动）：`delta` 是滚轮原始刻度。
     ConsoleScroll { delta: i32 },
     /// 拖动控制台标题栏：目标左上角（虚拟屏幕坐标）。
@@ -296,6 +385,8 @@ pub enum OverlayEvent {
     ConsoleResizeEnd,
     /// 全局热键 Ctrl+Alt+T：切换控制台开关。
     ConsoleToggle,
+    /// 全局热键 Ctrl+Alt+H / 托盘菜单：隐藏或恢复全部栅栏视觉。
+    QuickHideToggle,
     /// 键盘按下（overlay 获得焦点时）：`vk` 虚拟键码，`ctrl` 是否按住 Ctrl。
     /// 文本字符走 `Char`（经 TranslateMessage 转换）。
     KeyDown { vk: u32, ctrl: bool },
@@ -336,6 +427,10 @@ pub enum OverlayEvent {
         from: usize,
         to: usize,
     },
+    /// 系统注销/关机（`WM_QUERYENDSESSION`）：App 立即恢复真实桌面图标。
+    SystemShutdown,
+    /// 栅栏模式下右键桌面空白处：App 弹出“新建栅栏”菜单。
+    DesktopMenu,
 }
 
 /// 拖拽会话（按下到松开之间持续有效）。
@@ -367,10 +462,19 @@ enum DragKind {
     ConsoleResize(ResizeZone),
     /// 侧边栏图标拖动 → 重新排序。
     SidebarReorder,
+    /// 跨栅栏分类拖拽（目标栅栏；None = 暂未命中）。
+    Classify { target: Option<usize> },
+    /// 控制中心透明度滑轨拖动。
+    ConsoleSlider,
+    /// 控制中心网格选择器拖动。
+    ConsoleGrid,
 }
 
 struct WindowState {
     model: HitModel,
+    /// overlay 窗口在虚拟屏幕上的原点（屏幕坐标）。WM_MOUSEWHEEL 的坐标是屏幕坐标，
+    /// 而命中模型是客户端/虚拟屏幕坐标，需要减去该原点（多屏负坐标尤其重要）。
+    origin: (i32, i32),
     drag: Option<DragState>,
     /// 当前悬停目标（栅栏下标, 图标下标）；仅在变化时上报 Hover 事件。
     hovered: Option<(usize, Option<usize>)>,
@@ -378,6 +482,10 @@ struct WindowState {
     console_hovered: Option<ConsoleZone>,
     /// 上次上报的光标位置（仅位置变化才发 CursorMove，避免无谓重绘）。
     last_cursor: Option<(f32, f32)>,
+    /// 是否已安排“延迟拖出”定时器（避免每次鼠标移动都重置计时）。
+    drag_out_timer: bool,
+    /// 是否启用桌面空白右键钩子；Sylva 子菜单常驻，不随栅栏/原始桌面模式切换。
+    desktop_menu_enabled: bool,
     /// 上次 SetWindowRgn 的区域句柄：区域几何未变时跳过 SetWindowRgn。
     ///
     /// SetWindowRgn 会使窗口无效并触发整窗重绘/重合成（即使区域完全相同），
@@ -408,6 +516,8 @@ pub struct OverlayWindow {
     pub width: u32,
     pub height: u32,
     state: *mut WindowState,
+    /// 低层鼠标钩子（桌面空白处右键）；Drop 时解除。
+    mouse_hook: Option<HHOOK>,
 }
 
 impl OverlayWindow {
@@ -449,10 +559,13 @@ impl OverlayWindow {
         let edit_brush = unsafe { CreateSolidBrush(COLORREF(0x00_22_16_10)) }; // RGB(16,22,34)
         let state = Box::new(WindowState {
             model: HitModel::default(),
+            origin: (vx, vy),
             drag: None,
             hovered: None,
             console_hovered: None,
             last_cursor: None,
+            drag_out_timer: false,
+            desktop_menu_enabled: true,
             last_region: None,
             handler: None,
             edit_brush,
@@ -542,6 +655,15 @@ impl OverlayWindow {
                 b'T' as u32,
             )
         };
+        // Quick hide（Ctrl+Alt+H）：隐藏全部栅栏与桌面图标视觉，再按恢复。
+        let _ = unsafe {
+            RegisterHotKey(
+                Some(hwnd),
+                QUICK_HIDE_HOTKEY_ID,
+                MOD_CONTROL | MOD_ALT,
+                b'H' as u32,
+            )
+        };
         let _shown = unsafe { ShowWindow(hwnd, SW_SHOWNA) };
 
         // 隐藏焦点代理：独立顶层窗口（离屏 1×1，不进任务栏），只负责让进程成为前台，
@@ -567,10 +689,18 @@ impl OverlayWindow {
             let _ = ShowWindow(proxy, SW_SHOWNOACTIVATE);
         }
 
-        // 接受文件拖放（WM_DROPFILES）：把任意文件/文件夹/快捷方式拖进栅栏。
-        // 区域裁剪不拦截拖放——系统按窗口可见区域（region）决定拖放目标，
-        // 拖到栅栏并集内命中本窗口，拖到区域外仍落到桌面。
-        unsafe { DragAcceptFiles(hwnd, true) };
+        // 低层鼠标钩子：栅栏模式下右键桌面空白处 → 弹出 Sylva 的“新建栅栏”菜单。
+        // 只拦截“光标下是桌面窗口且不在栅栏/控制台上”的右键；其它应用/任务栏不受影响。
+        let _ = DESKTOP_HOOK_HWND.set(hwnd.0 as isize);
+        let mouse_hook =
+            unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(desktop_mouse_hook), Some(hinstance), 0) }
+                .ok();
+        if mouse_hook.is_none() {
+            tracing::warn!("桌面空白处右键菜单钩子安装失败；仍可从托盘/栅栏右键添加栅栏");
+        }
+
+        // OLE 拖放目标由 App 通过 `sylva_shell::drag::register` 注册（需求 §4.2）：
+        // 单 overlay + 按栅栏命中矩形分发；不再使用 WM_DROPFILES。
 
         // 库同步定时器：周期触发 `SyncLibrary`（见 `WM_TIMER` 处理）
         let _ = unsafe { SetTimer(Some(hwnd), SYNC_LIBRARY_TIMER, SYNC_LIBRARY_MS, None) };
@@ -583,6 +713,7 @@ impl OverlayWindow {
             width: vw as u32,
             height: vh as u32,
             state: state_ptr,
+            mouse_hook,
         })
     }
 
@@ -591,6 +722,12 @@ impl OverlayWindow {
         let state = unsafe { &mut *self.state };
         state.model = model;
         apply_region(self.hwnd, &state.model, &mut state.last_region);
+    }
+
+    /// 控制桌面右键钩子是否生效。保留开关用于诊断/异常场景；正常运行时始终开启，
+    /// 菜单本身仍保留 Windows 原始项。
+    pub fn set_desktop_menu_enabled(&self, enabled: bool) {
+        unsafe { (&mut *self.state).desktop_menu_enabled = enabled };
     }
 
     /// 设置用户交互事件处理器。回调返回新的命中模型（由 App 根据新布局生成），
@@ -619,6 +756,8 @@ impl OverlayWindow {
         self.y = vy;
         self.width = w;
         self.height = h;
+        // 滚轮消息用屏幕坐标，拓扑变化后同步客户端原点。
+        unsafe { (&mut *self.state).origin = (vx, vy) };
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
@@ -637,9 +776,15 @@ impl Drop for OverlayWindow {
     fn drop(&mut self) {
         // 先销毁窗口（同步触发 WM_DESTROY 及后续消息），再回收状态，
         // 避免窗口销毁期间 wnd_proc 引用已释放的内存。
+        if let Some(hook) = self.mouse_hook {
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+        }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), SYNC_LIBRARY_TIMER);
             let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
+            let _ = KillTimer(Some(self.hwnd), DRAG_OUT_TIMER);
         }
         let _ = unsafe { DestroyWindow(self.hwnd) };
         let _ = unsafe { DestroyWindow(self.proxy) };
@@ -743,9 +888,9 @@ unsafe extern "system" fn proxy_proc(
 /// 直接跳过 SetWindowRgn——该调用会让窗口失效、强制重绘/重合成，悬停/光标移动期间
 /// 区域几乎总是不变，反复调用只会增加 CPU 与重绘抖动（Dock 场景尤其明显）。
 fn apply_region(hwnd: HWND, model: &HitModel, cached: &mut Option<HRGN>) {
-    let Some(rgn) = build_region(model) else {
-        return;
-    };
+    // 空模型也必须设置区域：Quick hide / 所有栅栏关闭时，旧区域若保留，
+    // 窗口仍会拦截鼠标，桌面看起来「点不动」。空区域 = 完全穿透。
+    let rgn = build_region(model).unwrap_or_else(|| unsafe { CreateRectRgn(0, 0, 0, 0) });
     if let Some(prev) = cached {
         unsafe {
             if EqualRgn(*prev, rgn) == TRUE {
@@ -764,7 +909,17 @@ fn apply_region(hwnd: HWND, model: &HitModel, cached: &mut Option<HRGN>) {
 fn build_region(model: &HitModel) -> Option<HRGN> {
     let mut acc: Option<HRGN> = None;
     for f in &model.fences {
-        add_rect(&mut acc, f.body);
+        // 边框/抗锯齿会比栅栏矩形多出约 1~2px；区域只给 body 时左侧描边可能被
+        // SetWindowRgn 裁掉。向外扩 2px（透明像素，不影响内容/命中语义）。
+        add_rect(
+            &mut acc,
+            RectF {
+                x: f.body.x - 2.0,
+                y: f.body.y - 2.0,
+                w: f.body.w + 4.0,
+                h: f.body.h + 4.0,
+            },
+        );
         if let Some(tt) = f.tooltip {
             add_rect(&mut acc, tt);
         }
@@ -799,6 +954,92 @@ fn add_rect(acc: &mut Option<HRGN>, r: RectF) {
             }
         }
     }
+}
+
+/// 低层鼠标钩子：只在栅栏模式下拦截“桌面空白处右键”，弹出 Sylva 的新建栅栏菜单。
+///
+/// 不拦截：
+/// - 栅栏/控制台内部的右键（交给 overlay 自己的菜单）；
+/// - 其它应用、任务栏、托盘。
+///   Sylva 子菜单常驻，原始桌面模式 / Quick hide 下同样保留 Windows 原始菜单。
+unsafe extern "system" fn desktop_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let msg = wparam.0 as u32;
+    if code == HC_ACTION as i32 && (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP) {
+        let Some(hwnd) = DESKTOP_HOOK_HWND.get().map(|v| HWND(*v as *mut _)) else {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        };
+        if !hwnd.is_invalid() {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                if state.desktop_menu_enabled {
+                    let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+                    let (mx, my) = screen_to_client(info.pt, state.origin);
+                    let over_console = state
+                        .model
+                        .console
+                        .as_ref()
+                        .map(|c| c.rect.contains(mx, my))
+                        .unwrap_or(false);
+                    let over_fence = state.model.fences.iter().any(|f| f.body.contains(mx, my));
+                    if !over_console && !over_fence && is_desktop_point(info.pt) {
+                        // 按下与松开都吞掉，避免 Explorer 桌面自己的菜单/跟踪状态。
+                        if msg == WM_RBUTTONUP {
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(hwnd),
+                                    WM_SYLVA_DESKTOP_MENU,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                        return LRESULT(1);
+                    }
+                }
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// 屏幕点下是否为桌面窗口（Progman/WorkerW/DefView/ListView 及其祖先）。
+fn is_desktop_point(pt: POINT) -> bool {
+    let mut hwnd = unsafe { WindowFromPoint(pt) };
+    if hwnd.is_invalid() {
+        return false;
+    }
+    // overlay 自己的区域（栅栏/工具提示/编辑框）由 overlay 处理，不能当成桌面。
+    if class_name_of(hwnd)
+        .map(|c| c.starts_with("Sylva"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    for _ in 0..4 {
+        if let Some(class) = class_name_of(hwnd)
+            && matches!(
+                class.as_str(),
+                "Progman" | "WorkerW" | "SHELLDLL_DefView" | "SysListView32"
+            )
+        {
+            return true;
+        }
+        match unsafe { GetParent(hwnd) } {
+            Ok(parent) if !parent.is_invalid() => hwnd = parent,
+            _ => break,
+        }
+    }
+    false
+}
+
+fn class_name_of(hwnd: HWND) -> Option<String> {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if n <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..n as usize]))
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -836,41 +1077,6 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(1)
         }
-        // 文件拖放：把路径交给 App 加入命中栅栏
-        WM_DROPFILES => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
-            if ptr.is_null() {
-                return LRESULT(0);
-            }
-            let state = unsafe { &mut *ptr };
-            let hdrop = HDROP(wparam.0 as *mut core::ffi::c_void);
-            let mut pt = POINT::default();
-            unsafe {
-                let _ = DragQueryPoint(hdrop, &mut pt);
-            }
-            let paths = drop_paths(hdrop);
-            unsafe { DragFinish(hdrop) };
-            if !paths.is_empty() {
-                // 用整栅栏矩形（标题/主体/手柄，含边缘）判定落点——拖到标题栏也应进该栅栏
-                let px = pt.x as f32;
-                let py = pt.y as f32;
-                let fence = state
-                    .model
-                    .fences
-                    .iter()
-                    .find(|f| {
-                        f.body.contains(px, py)
-                            || f.title.contains(px, py)
-                            || f.grip.contains(px, py)
-                    })
-                    .map(|f| f.id)
-                    .or_else(|| state.model.fences.first().map(|f| f.id));
-                if let Some(fence) = fence {
-                    emit_event(hwnd, state, OverlayEvent::FilesDropped { fence, paths });
-                }
-            }
-            LRESULT(0)
-        }
         // 滚轮滚动：消息发给光标下的窗口（焦点窗口在别的线程时系统自动重定向）。
         // 高字是有符号滚轮刻度（WHEEL_DELTA=120 一格）。滚到栅栏/滚动条上才滚动。
         WM_MOUSEWHEEL => {
@@ -885,8 +1091,7 @@ unsafe extern "system" fn wnd_proc(
             }
             let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
             if delta != 0 {
-                let px = pt.x as f32;
-                let py = pt.y as f32;
+                let (px, py) = screen_to_client(pt, state.origin);
                 // 控制台面板优先：滚轮滚动待办列表
                 if let Some(c) = &state.model.console
                     && c.rect.contains(px, py)
@@ -1035,6 +1240,15 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // Quick hide 热键（Ctrl+Alt+H）
+        WM_HOTKEY if wparam.0 as i32 == QUICK_HIDE_HOTKEY_ID => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::QuickHideToggle);
+            }
+            LRESULT(0)
+        }
         // 托盘图标回调：右键 → 控制中心菜单；双击 → 切换控制中心开合
         WM_TRAY if lparam.0 as u32 == WM_RBUTTONUP => {
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
@@ -1049,6 +1263,49 @@ unsafe extern "system" fn wnd_proc(
             if !ptr.is_null() {
                 let state = unsafe { &mut *ptr };
                 emit_event(hwnd, state, OverlayEvent::TrayToggle);
+            }
+            LRESULT(0)
+        }
+        // 图标拖出延迟定时器：光标离开源栅栏且暂时没有命中其他栅栏时，给用户
+        // 穿过空隙进入目标栅栏的时间；超时仍在外侧才真正启动 OLE 拖出。
+        WM_TIMER if wparam.0 == DRAG_OUT_TIMER => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if ptr.is_null() {
+                return LRESULT(0);
+            }
+            let state = unsafe { &mut *ptr };
+            state.drag_out_timer = false;
+            unsafe {
+                let _ = KillTimer(Some(hwnd), DRAG_OUT_TIMER);
+            }
+            if let Some(drag) = state.drag
+                && let Some(icon_idx) = drag.pressed_icon
+            {
+                let (mx, my) = cursor_client(state);
+                if let Some(target) = other_fence_hit(&state.model, drag.fence, mx, my) {
+                    state.drag = Some(DragState {
+                        kind: DragKind::Classify {
+                            target: Some(target.id),
+                        },
+                        fence: drag.fence,
+                        start: drag.start,
+                        orig: drag.orig,
+                        pressed_icon: Some(icon_idx),
+                        ctrl: is_ctrl_down(),
+                    });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::IconClassifyDrag {
+                            from: drag.fence,
+                            icon: icon_idx,
+                            to: Some(target.id),
+                            ctrl: is_ctrl_down(),
+                        },
+                    );
+                } else if outside_source(&state.model, drag.fence, mx, my) {
+                    begin_drag_out(hwnd, state, drag.fence, icon_idx);
+                }
             }
             LRESULT(0)
         }
@@ -1185,6 +1442,25 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(state.edit_brush.0 as isize)
         }
+        // 低层鼠标钩子捕获到“桌面空白处右键”：交给 App 弹出新建栅栏菜单。
+        WM_SYLVA_DESKTOP_MENU => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::DesktopMenu);
+            }
+            LRESULT(0)
+        }
+        // 系统注销/关机：在允许关机前恢复真实桌面图标（恢复守卫进程可能来不及被调度）。
+        // 返回 TRUE 表示同意结束会话；App 侧同步执行 ShowWindow(SW_SHOW)。
+        WM_QUERYENDSESSION => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::SystemShutdown);
+            }
+            LRESULT(1)
+        }
         // 外部信号：干净退出消息循环（wnd_proc 跑在主线程，PostQuitMessage 投递到主队列）
         WM_APP_QUIT => {
             unsafe { PostQuitMessage(0) };
@@ -1253,8 +1529,26 @@ fn on_button_down(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     if let Some(c) = &state.model.console
         && c.rect.contains(mx, my)
     {
+        let console_rect = c.rect;
         if let Some(zone) = console_zone_at(c, mx, my) {
             emit_event(hwnd, state, OverlayEvent::ConsoleClick { zone });
+            // 透明度滑轨 / 网格选择器：按下后保持捕获，移动时连续更新。
+            let kind = match zone {
+                ConsoleZone::FenceOpacity(_) => Some(DragKind::ConsoleSlider),
+                ConsoleZone::GridPicker(_, _) => Some(DragKind::ConsoleGrid),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                state.drag = Some(DragState {
+                    kind,
+                    fence: usize::MAX,
+                    start: (mx, my),
+                    orig: console_rect,
+                    pressed_icon: None,
+                    ctrl: false,
+                });
+                unsafe { SetCapture(hwnd) };
+            }
             return;
         }
         // 右/下边缘与右下角 → 缩放（抓边即缩放，标准窗口行为）
@@ -1352,6 +1646,20 @@ fn on_button_down(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                 .find(|i| i.fence == f.id && i.rect.contains(mx, my))
                 .map(|i| i.icon);
             if pressed_icon.is_none() {
+                // 标题栏被关闭后没有标题拖动把手：空白区域直接移动栅栏。
+                // 代价是该栅栏不支持橡皮筋框选（无标题栏时的取舍）。
+                if !f.show_title {
+                    state.drag = Some(DragState {
+                        kind: DragKind::Move,
+                        fence: f.id,
+                        start: (mx, my),
+                        orig: f.body,
+                        pressed_icon: None,
+                        ctrl: false,
+                    });
+                    unsafe { SetCapture(hwnd) };
+                    return;
+                }
                 let ctrl = is_ctrl_down();
                 state.drag = Some(DragState {
                     kind: DragKind::Select,
@@ -1513,6 +1821,71 @@ fn hover_key(model: &HitModel, mx: f32, my: f32) -> Option<(usize, Option<usize>
     None
 }
 
+/// Shift 是否按下：按住 Shift 拖图标时立即进入 OLE 拖出（跳过延迟）。
+fn is_shift_down() -> bool {
+    unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
+}
+
+/// 当前光标位置转 overlay 客户端坐标。
+fn cursor_client(state: &WindowState) -> (f32, f32) {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    screen_to_client(pt, state.origin)
+}
+
+fn cancel_drag_out_timer(hwnd: HWND, state: &mut WindowState) {
+    state.drag_out_timer = false;
+    unsafe {
+        let _ = KillTimer(Some(hwnd), DRAG_OUT_TIMER);
+    }
+}
+
+fn schedule_drag_out_timer(hwnd: HWND, state: &mut WindowState) {
+    if state.drag_out_timer {
+        return;
+    }
+    state.drag_out_timer = true;
+    unsafe {
+        let _ = SetTimer(Some(hwnd), DRAG_OUT_TIMER, DRAG_OUT_DELAY_MS, None);
+    }
+}
+
+/// 真正开始 OLE 拖出：清掉本地拖拽状态并通知 App。
+fn begin_drag_out(hwnd: HWND, state: &mut WindowState, fence: usize, icon: usize) {
+    cancel_drag_out_timer(hwnd, state);
+    state.drag = None;
+    unsafe {
+        let _ = ReleaseCapture();
+    }
+    emit_event(hwnd, state, OverlayEvent::IconDragOut { fence, icon });
+}
+
+/// 光标下除源栅栏之外的栅栏（用于分类目标）。
+fn other_fence_hit(model: &HitModel, source: usize, mx: f32, my: f32) -> Option<FenceHit> {
+    model
+        .fences
+        .iter()
+        .find(|f| f.id != source && f.body.contains(mx, my))
+        .copied()
+}
+
+/// 光标是否已离开源栅栏（侧边栏留 24px 活动余量）。
+fn outside_source(model: &HitModel, source: usize, mx: f32, my: f32) -> bool {
+    model
+        .fences
+        .iter()
+        .find(|f| f.id == source)
+        .map(|f| {
+            mx < f.body.x - 24.0
+                || mx > f.body.x + f.body.w + 24.0
+                || my < f.body.y - 24.0
+                || my > f.body.y + f.body.h + 24.0
+        })
+        .unwrap_or(true)
+}
+
 /// 移动：拖动中连续上报新位置/新尺寸。目标一律用**原始矩形 + 鼠标总位移**
 /// （`drag.orig + (鼠标 - 按下点)`），即「原始目标」——App 层对每个原始目标
 /// 独立做碰撞/吸附。若用上一帧已生效矩形做增量，吸附是粘性的：被吸住后
@@ -1525,40 +1898,99 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     let orig = drag.orig;
     match drag.kind {
         DragKind::Move => {
-            // 侧边栏图标上按下 + 移动超阈值 → 切换为拖动排序模式
+            // 按下点在图标上：拖到另一个栅栏 = 分类移动/复制；拖到所有栅栏之外 =
+            // OLE 拖出。图标上按下不再移动整个栅栏，避免与两种拖拽语义冲突。
             if let Some(icon_idx) = drag.pressed_icon {
-                let is_sidebar = state
+                let source = state
                     .model
                     .fences
                     .iter()
                     .find(|f| f.id == drag.fence)
-                    .map(|f| f.is_sidebar)
-                    .unwrap_or(false);
+                    .copied();
+                let is_sidebar = source.map(|f| f.is_sidebar).unwrap_or(false);
                 let dx = mx - drag.start.0;
                 let dy = my - drag.start.1;
-                if is_sidebar && (dx * dx + dy * dy) > REORDER_THRESHOLD * REORDER_THRESHOLD {
+                let moved2 = dx * dx + dy * dy;
+                if moved2 <= DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD {
+                    return;
+                }
+
+                // 另一个栅栏命中 → 进入分类拖拽（门户目标也先进入，由 App 拒绝）。
+                let target = other_fence_hit(&state.model, drag.fence, mx, my);
+                if let Some(target) = target {
+                    cancel_drag_out_timer(hwnd, state);
                     state.drag = Some(DragState {
-                        kind: DragKind::SidebarReorder,
+                        kind: DragKind::Classify {
+                            target: Some(target.id),
+                        },
                         fence: drag.fence,
                         start: drag.start,
                         orig: drag.orig,
                         pressed_icon: Some(icon_idx),
-                        ctrl: false,
+                        ctrl: is_ctrl_down(),
                     });
                     emit_event(
                         hwnd,
                         state,
-                        OverlayEvent::SidebarReorderDrag {
-                            fence: drag.fence,
+                        OverlayEvent::IconClassifyDrag {
+                            from: drag.fence,
                             icon: icon_idx,
-                            mx,
-                            my,
+                            to: Some(target.id),
+                            ctrl: is_ctrl_down(),
                         },
                     );
                     return;
                 }
+
+                // 光标是否已离开源栅栏（侧边栏留 24px 活动余量）。
+                let outside = outside_source(&state.model, drag.fence, mx, my);
+
+                if is_sidebar {
+                    if outside {
+                        // 不要立刻 OLE：先给用户穿过栅栏间空隙、进入目标栅栏的时间。
+                        if is_shift_down() || state.model.fences.len() <= 1 {
+                            begin_drag_out(hwnd, state, drag.fence, icon_idx);
+                        } else {
+                            schedule_drag_out_timer(hwnd, state);
+                        }
+                    } else if moved2 > REORDER_THRESHOLD * REORDER_THRESHOLD {
+                        cancel_drag_out_timer(hwnd, state);
+                        state.drag = Some(DragState {
+                            kind: DragKind::SidebarReorder,
+                            fence: drag.fence,
+                            start: drag.start,
+                            orig: drag.orig,
+                            pressed_icon: Some(icon_idx),
+                            ctrl: false,
+                        });
+                        emit_event(
+                            hwnd,
+                            state,
+                            OverlayEvent::SidebarReorderDrag {
+                                fence: drag.fence,
+                                icon: icon_idx,
+                                mx,
+                                my,
+                            },
+                        );
+                    }
+                    return;
+                }
+
+                // 网格/列表：仍在源栅栏内等待；离开源栅栏后延迟启动 OLE，
+                // 期间若进入另一个栅栏则切换为分类拖拽。
+                if outside {
+                    if is_shift_down() || state.model.fences.len() <= 1 {
+                        begin_drag_out(hwnd, state, drag.fence, icon_idx);
+                    } else {
+                        schedule_drag_out_timer(hwnd, state);
+                    }
+                } else {
+                    cancel_drag_out_timer(hwnd, state);
+                }
+                return;
             }
-            // 原始目标左上角 = 按下时矩形左上角 + 鼠标相对按下点的位移
+            // 标题栏/空白拖动：原始目标左上角 + 鼠标相对按下点的位移。
             let raw_x = orig.x + (mx - drag.start.0);
             let raw_y = orig.y + (my - drag.start.1);
             let event = OverlayEvent::FenceMove {
@@ -1569,6 +2001,42 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
         }
         DragKind::SidebarReorder => {
             if let Some(icon_idx) = drag.pressed_icon {
+                // 已经进入排序模式后，光标移到另一个栅栏仍应切换为分类拖拽；
+                // 否则从桌面收件箱拖到分类栅栏时会被“排序”状态劫持。
+                if let Some(target) = other_fence_hit(&state.model, drag.fence, mx, my) {
+                    cancel_drag_out_timer(hwnd, state);
+                    state.drag = Some(DragState {
+                        kind: DragKind::Classify {
+                            target: Some(target.id),
+                        },
+                        fence: drag.fence,
+                        start: drag.start,
+                        orig: drag.orig,
+                        pressed_icon: Some(icon_idx),
+                        ctrl: is_ctrl_down(),
+                    });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::IconClassifyDrag {
+                            from: drag.fence,
+                            icon: icon_idx,
+                            to: Some(target.id),
+                            ctrl: is_ctrl_down(),
+                        },
+                    );
+                    return;
+                }
+                // 离开 Dock 后进入“等待拖出”窗口；Shift 立即拖出。
+                if outside_source(&state.model, drag.fence, mx, my) {
+                    if is_shift_down() || state.model.fences.len() <= 1 {
+                        begin_drag_out(hwnd, state, drag.fence, icon_idx);
+                    } else {
+                        schedule_drag_out_timer(hwnd, state);
+                    }
+                    return;
+                }
+                cancel_drag_out_timer(hwnd, state);
                 emit_event(
                     hwnd,
                     state,
@@ -1579,6 +2047,34 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                         my,
                     },
                 );
+            }
+        }
+        DragKind::Classify { target } => {
+            if let Some(icon_idx) = drag.pressed_icon {
+                let next = other_fence_hit(&state.model, drag.fence, mx, my).map(|f| f.id);
+                if next.is_some() {
+                    cancel_drag_out_timer(hwnd, state);
+                }
+                if next != target {
+                    state.drag = Some(DragState {
+                        kind: DragKind::Classify { target: next },
+                        fence: drag.fence,
+                        start: drag.start,
+                        orig: drag.orig,
+                        pressed_icon: Some(icon_idx),
+                        ctrl: is_ctrl_down(),
+                    });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::IconClassifyDrag {
+                            from: drag.fence,
+                            icon: icon_idx,
+                            to: next,
+                            ctrl: is_ctrl_down(),
+                        },
+                    );
+                }
             }
         }
         DragKind::Select => {
@@ -1597,6 +2093,21 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                 selected,
             };
             emit_event(hwnd, state, event);
+        }
+        DragKind::ConsoleSlider | DragKind::ConsoleGrid => {
+            let slider = matches!(drag.kind, DragKind::ConsoleSlider);
+            if let Some(c) = &state.model.console
+                && let Some(zone) = console_zone_at(c, mx, my)
+            {
+                let valid = if slider {
+                    matches!(zone, ConsoleZone::FenceOpacity(_))
+                } else {
+                    matches!(zone, ConsoleZone::GridPicker(_, _))
+                };
+                if valid {
+                    emit_event(hwnd, state, OverlayEvent::ConsoleControlDrag { zone });
+                }
+            }
         }
         DragKind::ConsoleMove => {
             // 目标左上角 = 按下时面板左上角 + 鼠标相对按下点的位移
@@ -1666,26 +2177,69 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     }
 }
 
-/// 枚举 `WM_DROPFILES` 携带的文件路径。
-fn drop_paths(hdrop: HDROP) -> Vec<String> {
-    let mut out = Vec::new();
-    unsafe {
-        let n = DragQueryFileW(hdrop, u32::MAX, None);
-        for i in 0..n {
-            let len = DragQueryFileW(hdrop, i, None);
-            let mut buf = vec![0u16; len as usize + 1];
-            DragQueryFileW(hdrop, i, Some(&mut buf));
-            let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-            out.push(String::from_utf16_lossy(&buf[..end]));
-        }
-    }
-    out
-}
-
 /// 松开：结束拖拽会话。位移小于阈值且按在图标上 → 视为「单击选中」；
 /// 否则是拖动（无论是否移动，都通知 App 持久化布局）。
 fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
+    cancel_drag_out_timer(hwnd, state);
     if let Some(drag) = state.drag.take() {
+        let moved2 = (mx - drag.start.0).powi(2) + (my - drag.start.1).powi(2);
+        let over_other = drag
+            .pressed_icon
+            .and_then(|_| other_fence_hit(&state.model, drag.fence, mx, my))
+            .map(|f| f.id);
+        let outside = outside_source(&state.model, drag.fence, mx, my);
+
+        // 释放前若已跨过空隙、但仍未进入目标栅栏：这里补一次“按释放点拖出”。
+        // 正常缓慢拖出由 DRAG_OUT_TIMER 启动；快速拖出走本条兜底。
+        if drag.pressed_icon.is_some()
+            && moved2 > DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD
+            && over_other.is_none()
+            && outside
+            && matches!(drag.kind, DragKind::Move | DragKind::SidebarReorder)
+        {
+            emit_event(
+                hwnd,
+                state,
+                OverlayEvent::IconDragOut {
+                    fence: drag.fence,
+                    icon: drag.pressed_icon.unwrap_or_default(),
+                },
+            );
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            return;
+        }
+        // 尚未进入 Classify 状态但释放时已在目标栅栏上：直接分类释放。
+        if let Some(to) = over_other
+            && drag.pressed_icon.is_some()
+            && moved2 > DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD
+            && matches!(drag.kind, DragKind::Move | DragKind::SidebarReorder)
+        {
+            emit_event(
+                hwnd,
+                state,
+                OverlayEvent::IconClassifyDrop {
+                    from: drag.fence,
+                    icon: drag.pressed_icon.unwrap_or_default(),
+                    to,
+                    ctrl: is_ctrl_down(),
+                },
+            );
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            return;
+        }
+
+        if matches!(drag.kind, DragKind::ConsoleSlider | DragKind::ConsoleGrid) {
+            emit_event(hwnd, state, OverlayEvent::ConsoleControlDragEnd);
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            return;
+        }
+
         if drag.kind == DragKind::Move {
             let dx = mx - drag.start.0;
             let dy = my - drag.start.1;
@@ -1703,6 +2257,22 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                         ctrl: drag.ctrl,
                     },
                 );
+            }
+        } else if let DragKind::Classify { target } = drag.kind {
+            if let Some(icon) = drag.pressed_icon {
+                match target {
+                    Some(to) => emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::IconClassifyDrop {
+                            from: drag.fence,
+                            icon,
+                            to,
+                            ctrl: is_ctrl_down(),
+                        },
+                    ),
+                    None => emit_event(hwnd, state, OverlayEvent::IconClassifyCancel),
+                }
             }
         } else if drag.kind == DragKind::Select {
             // 框选结束：清除橡皮筋显示（选择结果已在最后一次 SelectDrag 中生效）
@@ -1730,10 +2300,9 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
             }
         }
         // 框选/控制台拖拽不是栅栏布局变化，不触发栅栏持久化
-        if matches!(
-            drag.kind,
-            DragKind::Move | DragKind::Resize(_) | DragKind::SidebarReorder
-        ) {
+        if matches!(drag.kind, DragKind::Resize(_) | DragKind::SidebarReorder)
+            || (drag.kind == DragKind::Move && drag.pressed_icon.is_none())
+        {
             emit_event(
                 hwnd,
                 state,
@@ -1851,6 +2420,14 @@ fn ime_string(hwnd: HWND, index: IME_COMPOSITION_STRING) -> String {
     out
 }
 
+/// 屏幕坐标 → overlay 客户端坐标（客户端 (0,0) = 虚拟屏原点）。
+///
+/// `WM_MOUSEWHEEL` 携带屏幕坐标；overlay 覆盖虚拟屏时客户端原点 = 虚拟屏原点，
+/// 多屏下该原点可能为负（副屏在主屏左/上），必须减去 origin 再命中栅栏。
+fn screen_to_client(pt: POINT, origin: (i32, i32)) -> (f32, f32) {
+    (pt.x as f32 - origin.0 as f32, pt.y as f32 - origin.1 as f32)
+}
+
 /// 鼠标消息 lParam → 客户端坐标（低/高 16 位有符号）。
 fn client_point(lparam: LPARAM) -> (f32, f32) {
     let x = (lparam.0 as u16) as i16 as i32;
@@ -1891,6 +2468,44 @@ mod tests {
         assert!(!r.contains(100.0, 601.0));
     }
 
+    fn hit(id: usize, x: f32, y: f32, w: f32, h: f32) -> FenceHit {
+        FenceHit {
+            body: RectF { x, y, w, h },
+            title: RectF { x, y, w, h: 20.0 },
+            grip: RectF::default(),
+            id,
+            tooltip: None,
+            is_sidebar: false,
+            show_title: true,
+            accepts_drop: true,
+        }
+    }
+
+    #[test]
+    fn classify_drag_helpers_hit_other_fence() {
+        let model = HitModel {
+            fences: vec![
+                hit(0, 0.0, 0.0, 100.0, 100.0),
+                hit(1, 200.0, 0.0, 100.0, 100.0),
+            ],
+            ..HitModel::default()
+        };
+        assert_eq!(
+            other_fence_hit(&model, 0, 250.0, 50.0).map(|f| f.id),
+            Some(1)
+        );
+        assert!(other_fence_hit(&model, 0, 50.0, 50.0).is_none());
+        assert!(!outside_source(&model, 0, 50.0, 50.0));
+        assert!(outside_source(&model, 0, 250.0, 50.0));
+    }
+
+    #[test]
+    fn wheel_screen_point_subtracts_virtual_origin() {
+        let pt = POINT { x: -1800, y: 100 };
+        assert_eq!(screen_to_client(pt, (-1920, 0)), (120.0, 100.0));
+        assert_eq!(screen_to_client(pt, (0, 0)), (-1800.0, 100.0));
+    }
+
     #[test]
     fn client_point_sign_extension() {
         // 负坐标（主屏左侧的副屏）：低/高 16 位带符号
@@ -1916,6 +2531,31 @@ mod tests {
 
         let size = (orig.w + (now.0 - start.0), orig.h + (now.1 - start.1));
         assert_eq!(size, (460.0, 310.0));
+    }
+
+    #[test]
+    fn empty_hit_model_has_no_region() {
+        let model = HitModel::default();
+        assert!(model.is_empty());
+        assert!(build_region(&model).is_none());
+    }
+
+    #[test]
+    fn hit_model_with_console_is_not_empty() {
+        let model = HitModel {
+            console: Some(ConsoleHit {
+                rect: RectF {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 10.0,
+                },
+                title: RectF::default(),
+                zones: Vec::new(),
+            }),
+            ..HitModel::default()
+        };
+        assert!(!model.is_empty());
     }
 
     #[test]
@@ -1945,6 +2585,8 @@ mod tests {
                     id: 0,
                     tooltip: None,
                     is_sidebar: false,
+                    show_title: true,
+                    accepts_drop: true,
                 },
                 FenceHit {
                     body: RectF {
@@ -1968,6 +2610,8 @@ mod tests {
                     id: 1,
                     tooltip: None,
                     is_sidebar: false,
+                    show_title: true,
+                    accepts_drop: true,
                 },
             ],
             icons: vec![],

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
+use crate::history::UndoStack;
+
 /// 图标的稳定标识符。
 ///
 /// 由 Shell 层的项指纹（PIDL / 路径哈希）生成，跨重启稳定，
@@ -116,6 +118,52 @@ impl FenceStyle {
     }
 }
 
+/// 图标悬停效果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoverEffect {
+    /// 不显示悬停反馈。
+    None,
+    /// 只显示悬停底色，不放大。
+    Highlight,
+    /// 放大 + 高亮。
+    #[default]
+    Scale,
+}
+
+impl HoverEffect {
+    pub fn label(self) -> &'static str {
+        match self {
+            HoverEffect::None => "关闭",
+            HoverEffect::Highlight => "高亮",
+            HoverEffect::Scale => "放大",
+        }
+    }
+}
+
+/// 栅栏内图标的显示形状。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IconShape {
+    /// 方角。
+    #[default]
+    Square,
+    /// 圆角方形。
+    Rounded,
+    /// 圆形。
+    Circle,
+}
+
+impl IconShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            IconShape::Square => "方角",
+            IconShape::Rounded => "圆角",
+            IconShape::Circle => "圆形",
+        }
+    }
+}
+
 /// 栅栏的布局格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FenceLayout {
@@ -209,6 +257,38 @@ pub struct FenceAppearance {
     /// 侧边栏停靠位置（仅 Sidebar 布局有效）。
     #[serde(default)]
     pub sidebar_pos: SidebarPosition,
+    /// 是否显示栅栏标题文字；关闭后标题栏仍保留为拖动把手。
+    #[serde(default = "default_true")]
+    pub show_title: bool,
+    /// 是否显示图标名称标签；关闭后只显示图标。
+    #[serde(default = "default_true")]
+    pub show_labels: bool,
+    /// 网格固定列数；0 = 按栅栏宽度自动计算。
+    #[serde(default)]
+    pub grid_cols: u32,
+    /// 网格固定可见行数；0 = 按内容/栅栏高度自动计算。
+    #[serde(default)]
+    pub grid_rows: u32,
+    /// 背景填充不透明度（0.0..=1.0）；1.0 = 使用当前风格默认值。
+    #[serde(default = "default_fill_opacity")]
+    pub fill_opacity: f32,
+    /// 栅栏内图标的显示形状。
+    #[serde(default)]
+    pub icon_shape: IconShape,
+    /// 图标悬停效果：关闭 / 仅高亮 / 放大。
+    #[serde(default)]
+    pub hover_effect: HoverEffect,
+    /// 是否渲染该栅栏；false 时成员保留、可在控制中心重新显示。
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_fill_opacity() -> f32 {
+    0.8
 }
 
 /// `bg_style` 未持久化时的默认值：玻璃（保持旧版滑块默认的半透明观感）。
@@ -237,7 +317,48 @@ impl Default for FenceAppearance {
             opacity: 0.55,
             tint: None,
             sidebar_pos: SidebarPosition::Left,
+            show_title: true,
+            show_labels: true,
+            grid_cols: 0,
+            grid_rows: 0,
+            fill_opacity: 0.8,
+            icon_shape: IconShape::Square,
+            hover_effect: HoverEffect::Scale,
+            hidden: false,
         }
+    }
+}
+
+/// 栅栏类型：手动空白栅栏 / 桌面收件箱 / 文件夹门户。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FenceKind {
+    /// 空白/手动栅栏：成员完全由用户拖入决定。
+    #[default]
+    Manual,
+    /// 桌面收件箱：镜像桌面目录，作为未分类图标的入口（全局唯一）。
+    DesktopInbox,
+    /// 文件夹门户：镜像 `storage_path` 指定的真实文件夹（只读成员关系）。
+    FolderPortal,
+}
+
+impl FenceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            FenceKind::Manual => "普通栅栏",
+            FenceKind::DesktopInbox => "桌面收件箱",
+            FenceKind::FolderPortal => "文件夹门户",
+        }
+    }
+
+    /// 只读镜像：桌面收件箱与文件夹门户；拖入/粘贴/移入均拒绝。
+    pub fn is_read_only(self) -> bool {
+        matches!(self, FenceKind::DesktopInbox | FenceKind::FolderPortal)
+    }
+
+    /// 是否由目录镜像维护成员列表（收件箱与文件夹门户）。
+    pub fn is_mirrored(self) -> bool {
+        matches!(self, FenceKind::DesktopInbox | FenceKind::FolderPortal)
     }
 }
 
@@ -255,16 +376,39 @@ pub struct Fence {
     /// 成员顺序即布局顺序。
     pub icon_ids: Vec<ItemId>,
     pub appearance: FenceAppearance,
+    /// 栅栏类型（空白/桌面收件箱/文件夹门户）。旧配置缺省为 Manual，
+    /// `normalize` 会把有 `storage_path` 的旧栅栏迁移为 FolderPortal。
+    #[serde(default)]
+    pub kind: FenceKind,
     /// 内容滚动偏移（物理像素；0 = 未滚动）。内容超出可视区时用滚轮滚动。
     #[serde(default)]
     pub scroll: f32,
-    /// 栅栏内项目的自定义存储位置（绝对路径）。None = 使用默认内部库。
-    /// 用户可在控制台中更改此路径，已有的库内项会被移动到新位置。
+    /// 镜像目录（绝对路径）。仅 `FolderPortal` / `DesktopInbox` 使用；
+    /// 普通空白栅栏为 None。
     #[serde(default)]
     pub storage_path: Option<String>,
     /// 侧边栏是否折叠（仅 Sidebar 布局有效）。折叠后只显示一个小箭头。
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// 用户主动从链接文件夹栅栏移除、但文件仍留在磁盘上的路径（小写）。
+    /// 文件夹镜像同步时跳过这些路径，实现“删除只移除引用、不删盘”且不会被
+    /// 4 秒同步重新加回来；撤销删除时移除对应项即可恢复。
+    #[serde(default)]
+    pub suppressed_paths: Vec<String>,
+}
+
+/// 图标来源：桌面接管枚举项，还是用户手动拖入/粘贴的收集项。
+///
+/// 需求 §2.1 要求两类成员显式区分；这里用标记字段而不是两个独立结构体，
+/// 避免把现有持久化格式一次性推倒重来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemOrigin {
+    /// 由 shell 层枚举真实桌面得到。
+    #[default]
+    DesktopIcon,
+    /// 用户从桌面/资源管理器拖入或粘贴得到的路径引用。
+    Collected,
 }
 
 /// 图标元数据。核心层只关心标识与展示信息。
@@ -287,9 +431,17 @@ pub struct Icon {
     /// 文件大小（字节）；文件夹/未知为 None。
     #[serde(default)]
     pub size_bytes: Option<u64>,
-    /// 是否为拖入/粘贴新增的项（非桌面枚举而来）。移除时直接删除，不回桌面。
+    /// 旧版兼容字段：是否为拖入/粘贴新增的项。新代码请用 `origin`。
+    /// `normalize` 会把旧数据的 `added=true` 迁移为 `origin=Collected`。
     #[serde(default)]
     pub added: bool,
+    /// 来源类型（需求 §2.1）。旧数据缺省为 DesktopIcon，由 `normalize` 按 added 迁移。
+    #[serde(default)]
+    pub origin: ItemOrigin,
+    /// 路径失效（文件被外部删除/移动/无权限）。失效项降级显示、可移除引用，
+    /// 但不得导致渲染崩溃。
+    #[serde(default)]
+    pub invalid: bool,
 }
 
 impl Icon {
@@ -304,7 +456,26 @@ impl Icon {
             modified_secs: None,
             size_bytes: None,
             added: false,
+            origin: ItemOrigin::DesktopIcon,
+            invalid: false,
         }
+    }
+
+    /// 是否为用户收集项（拖入/粘贴/旧内部库项）。
+    pub fn is_collected(&self) -> bool {
+        self.origin == ItemOrigin::Collected
+    }
+
+    /// 标记为收集项，并同步旧版 `added` 字段，保证降级回旧版本时语义不丢。
+    pub fn mark_collected(&mut self) {
+        self.origin = ItemOrigin::Collected;
+        self.added = true;
+    }
+
+    /// 标记为桌面枚举项（启动探测到的真实桌面图标）。
+    pub fn mark_desktop(&mut self) {
+        self.origin = ItemOrigin::DesktopIcon;
+        self.added = false;
     }
 }
 
@@ -380,6 +551,9 @@ pub struct Desk {
     /// 栅栏淡出隐藏）。控制中心「切换桌面」按钮切换。
     #[serde(default)]
     pub desktop_mode: bool,
+    /// 删除/移出操作的撤销队列（持久化，重启后仍可撤销）。
+    #[serde(default)]
+    pub undo: UndoStack,
 }
 
 /// 插件种类：内置实现 / 外部清单（当前只有内置种类有界面实现）。
@@ -465,7 +639,7 @@ fn default_next_todo_id() -> u64 {
 impl Desk {
     pub fn new(settings: crate::config::AppSettings) -> Self {
         Self {
-            version: 1,
+            version: 3,
             settings,
             fences: Vec::new(),
             free_icons: Vec::new(),
@@ -478,6 +652,7 @@ impl Desk {
             console_size: None,
             plugins: default_plugins(),
             desktop_mode: false,
+            undo: UndoStack::default(),
         }
     }
 
@@ -590,9 +765,11 @@ mod tests {
             state: FenceState::Expanded,
             icon_ids: Vec::new(),
             appearance: FenceAppearance::default(),
+            kind: FenceKind::Manual,
             scroll: 0.0,
             storage_path: None,
             sidebar_collapsed: false,
+            suppressed_paths: Vec::new(),
         });
 
         // 移到栅栏
@@ -628,9 +805,11 @@ mod tests {
             state: FenceState::Expanded,
             icon_ids: vec!["a".into(), "ghost".into()],
             appearance: FenceAppearance::default(),
+            kind: FenceKind::Manual,
             scroll: 0.0,
             storage_path: None,
             sidebar_collapsed: false,
+            suppressed_paths: Vec::new(),
         });
         d.free_icons = vec!["ghost2".into()];
         d.validate();
@@ -645,6 +824,13 @@ mod tests {
         assert!(!r.contains(Vec2 { x: 111.0, y: 10.0 }));
         let inner = r.inset(5.0);
         assert_eq!(inner, Rect::new(15.0, 15.0, 90.0, 40.0));
+    }
+
+    #[test]
+    fn only_manual_fences_are_writable() {
+        assert!(!FenceKind::Manual.is_read_only());
+        assert!(FenceKind::DesktopInbox.is_read_only());
+        assert!(FenceKind::FolderPortal.is_read_only());
     }
 
     #[test]
@@ -664,6 +850,13 @@ mod tests {
         assert_eq!(a.layout, FenceLayout::Grid);
         assert_eq!(a.opacity, 0.55);
         assert_eq!(a.tint, None);
+        assert!(a.show_title);
+        assert!(a.show_labels);
+        assert_eq!(a.grid_cols, 0);
+        assert_eq!(a.grid_rows, 0);
+        assert_eq!(a.fill_opacity, 0.8);
+        assert_eq!(a.icon_shape, IconShape::Square);
+        assert_eq!(a.hover_effect, HoverEffect::Scale);
     }
 
     #[test]
@@ -680,6 +873,25 @@ mod tests {
         assert_eq!(d.plugins.len(), 2);
         assert!(d.plugins.iter().any(|p| p.id == "todo" && p.enabled));
         assert!(!d.desktop_mode);
+    }
+
+    #[test]
+    fn old_added_flag_migrates_to_origin() {
+        let old = r#"{"version":1,"settings":{"show_free_area":true,"free_area_height":90.0,"hotkeys":{},"autostart":false},"fences":[],"free_icons":[],"icons":{"a":{"id":"a","display_name":"A","kind":"Doc","added":true},"b":{"id":"b","display_name":"B","kind":"Doc"}}}"#;
+        let d = crate::config::normalize(serde_json::from_str(old).expect("旧配置应可反序列化"));
+        assert_eq!(d.icons["a"].origin, ItemOrigin::Collected);
+        assert!(d.icons["a"].added);
+        assert_eq!(d.icons["b"].origin, ItemOrigin::DesktopIcon);
+        assert!(!d.icons["b"].invalid);
+    }
+
+    #[test]
+    fn fence_suppressed_paths_are_backward_compatible() {
+        let f: Fence = serde_json::from_str(
+            r#"{"id":1,"title":null,"monitor_id":0,"bounds":{"x":0.0,"y":0.0,"w":10.0,"h":10.0},"state":"Expanded","icon_ids":[],"appearance":{"bg_color":[0.0,0.0,0.0,0.0],"corner_radius":0.0,"acrylic":false,"title_bar_height":0.0,"padding":0.0,"icon_size":0.0,"gap":0.0,"border_width":0.0,"opacity":0.0}}"#,
+        )
+        .expect("旧栅栏应可反序列化");
+        assert!(f.suppressed_paths.is_empty());
     }
 
     #[test]

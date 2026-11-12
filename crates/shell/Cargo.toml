@@ -9,3 +9,4 @@ license.workspace = true
 sylva-core = { workspace = true }
 crossbeam-channel = { workspace = true }
 windows = { workspace = true }
+windows-core = { workspace = true }

@@ -27,18 +27,20 @@ use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARA
 use windows::Win32::System::Com::IBindCtx;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    BHID_SFUIObject, CMF_NORMAL, CMINVOKECOMMANDINFO, IContextMenu, IContextMenu2, IContextMenu3,
-    IShellItem, SHCreateItemFromParsingName,
+    BHID_SFUIObject, CMF_NORMAL, CMINVOKECOMMANDINFO, GCS_VERBW, IContextMenu, IContextMenu2,
+    IContextMenu3, IShellItem, IShellView, SHCreateItemFromParsingName, SHGetDesktopFolder,
+    SVGIO_BACKGROUND,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-    GetMessageW, HWND_MESSAGE, InsertMenuW, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetMessageW, HMENU,
+    HWND_MESSAGE, MF_BYPOSITION, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassW, RemoveMenu, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_DRAWITEM, WM_INITMENUPOPUP,
     WM_MEASUREITEM, WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WM_NULL,
     WNDCLASS_STYLES, WNDCLASSW, WS_POPUP,
 };
-use windows::core::{Interface, PCSTR, PCWSTR};
+use windows::core::{Interface, PCSTR, PCWSTR, PSTR};
 
 /// Shell 项命令 ID 区间（`QueryContextMenu` 的 idCmdFirst..=idCmdLast）。
 const SHELL_CMD_FIRST: u32 = 0x7000;
@@ -48,6 +50,7 @@ const SHELL_CMD_LAST: u32 = 0x7FFF;
 /// 「移出栅栏」= 0x8000，「重命名」= 0x8001。
 pub const CMD_REMOVE: usize = 0x8000;
 const CMD_RENAME: usize = 0x8001;
+const CMD_TOGGLE_DESKTOP: usize = 0x8002;
 
 /// 菜单动作结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +59,8 @@ pub enum ShellMenuResult {
     Remove,
     /// 点击了 Sylva 注入的「重命名」。
     Rename,
+    /// 点击了 Sylva 注入的「切换栅栏/桌面」。
+    ToggleDesktop,
     /// 点击了 Shell 真实命令（已通过 `InvokeCommand` 执行）。
     Invoked,
     /// 用户取消菜单（Esc / 点击别处关闭）。
@@ -101,10 +106,17 @@ fn primed_set() -> std::sync::MutexGuard<'static, HashSet<String>> {
 /// 「首次右键软件崩溃」。解决：右键前先在**后台线程**把该文件类型的 Shell 扩展
 /// 加载并初始化好（`prime_*`），再走主线程菜单。扩展慢初始化只发生一次（这就
 /// 是「重开软件就正常」的原因），预热后右键即为「第二次」速度。
-pub fn show(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMenuResult {
+pub fn show(
+    path: &str,
+    hwnd: HWND,
+    sx: i32,
+    sy: i32,
+    managed: bool,
+    desktop_mode: bool,
+) -> ShellMenuResult {
     // 类型未预热则后台预热；等待期间泵送消息，窗口保持可响应（不触发 AppHang）
     ensure_primed(path, hwnd);
-    run_menu(path, hwnd, sx, sy, managed)
+    run_menu(path, hwnd, sx, sy, managed, desktop_mode)
 }
 
 /// 启动时预热：把栅栏里已有文件类型的 Shell 扩展在后台加载并初始化。
@@ -269,7 +281,257 @@ fn pump_until<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
 
 /// 在**主线程**上弹出 Shell 右键菜单并执行选中命令（模态，阻塞到菜单关闭）。
 /// 由 `show` 调用（见 `show`）；COM 必须在调用线程上已初始化。
-fn run_menu(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMenuResult {
+/// 隐藏 Shell 原生“删除”动词（本地化显示名可能是“删除”）。
+/// Sylva 的删除只移除引用，不能让 Windows Shell 把文件删到回收站。
+fn hide_shell_delete(menu: HMENU, ctx: &IContextMenu2, first_shell_pos: usize) {
+    let count = unsafe { GetMenuItemCount(Some(menu)) };
+    if count <= 0 {
+        return;
+    }
+    // 从后往前删，避免位置索引变化。
+    for pos in (first_shell_pos..count as usize).rev() {
+        let id = unsafe { GetMenuItemID(menu, pos as i32) };
+        if !(SHELL_CMD_FIRST..=SHELL_CMD_LAST).contains(&id) {
+            continue;
+        }
+        let mut buf = [0u16; 64];
+        let offset = (id - SHELL_CMD_FIRST) as usize;
+        let ok = unsafe {
+            ctx.GetCommandString(
+                offset,
+                GCS_VERBW,
+                None,
+                PSTR(buf.as_mut_ptr() as *mut u8),
+                buf.len() as u32,
+            )
+        };
+        let mut remove = false;
+        if ok.is_ok() {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let verb = String::from_utf16_lossy(&buf[..end]).to_ascii_lowercase();
+            remove = verb == "delete" || verb.contains("删除");
+        }
+        if !remove {
+            // 有些扩展不支持 GCS_VERBW：退回读菜单显示文本（本地化“删除”）。
+            let mut text = [0u16; 128];
+            let n = unsafe { GetMenuStringW(menu, pos as u32, Some(&mut text), MF_BYPOSITION) };
+            if n > 0 {
+                let display = String::from_utf16_lossy(&text[..n as usize]).to_ascii_lowercase();
+                remove = display == "delete" || display.contains("删除");
+            }
+        }
+        if remove {
+            unsafe {
+                let _ = RemoveMenu(menu, pos as u32, MF_BYPOSITION);
+            }
+            tracing::debug!(pos, "已隐藏 Shell 原生删除动词");
+        }
+    }
+}
+
+/// 桌面空白右键：保留 Windows 原始桌面菜单，追加 Sylva 子菜单。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopMenuResult {
+    AddBlank,
+    AddLinked,
+    AddInbox,
+    OpenConsole,
+    ToggleDesktop,
+    Invoked,
+    Canceled,
+    Failed,
+}
+
+const CMD_DESKTOP_BLANK: usize = 0x8100;
+const CMD_DESKTOP_LINKED: usize = 0x8101;
+const CMD_DESKTOP_INBOX: usize = 0x8102;
+const CMD_DESKTOP_CONSOLE: usize = 0x8103;
+const CMD_DESKTOP_TOGGLE: usize = 0x8104;
+
+pub fn show_desktop(hwnd: HWND, sx: i32, sy: i32, desktop_mode: bool) -> DesktopMenuResult {
+    let desktop = match unsafe { SHGetDesktopFolder() } {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("获取桌面 ShellFolder 失败: {e}");
+            return DesktopMenuResult::Failed;
+        }
+    };
+    // 桌面背景的 IContextMenu（与资源管理器桌面右键同源）。
+    let ctx: IContextMenu = match unsafe { desktop.CreateViewObject(hwnd) } {
+        Ok(c) => c,
+        Err(e) => {
+            // 某些 Shell 版本不直接支持 IContextMenu；退回 IShellView 的背景对象。
+            match unsafe { desktop.CreateViewObject::<IShellView>(hwnd) }
+                .and_then(|view| unsafe { view.GetItemObject(SVGIO_BACKGROUND) })
+            {
+                Ok(c) => c,
+                Err(e2) => {
+                    tracing::warn!("创建桌面 IContextMenu 失败: {e} / {e2}");
+                    return DesktopMenuResult::Failed;
+                }
+            }
+        }
+    };
+    let ctx3: Option<IContextMenu3> = ctx.cast::<IContextMenu3>().ok();
+    let ctx2: IContextMenu2 = match ctx.cast::<IContextMenu2>() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("桌面菜单不支持 IContextMenu2: {e}");
+            return DesktopMenuResult::Failed;
+        }
+    };
+    let menu = unsafe { CreatePopupMenu().unwrap_or_default() };
+    if menu.is_invalid() {
+        return DesktopMenuResult::Failed;
+    }
+    // 先构建 Windows 原始桌面菜单，再追加 Sylva 子菜单。
+    let _ = unsafe { ctx2.QueryContextMenu(menu, 0, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL) };
+    let sub = unsafe { CreatePopupMenu().unwrap_or_default() };
+    if sub.is_invalid() {
+        unsafe {
+            let _ = DestroyMenu(menu);
+        }
+        return DesktopMenuResult::Failed;
+    }
+    unsafe {
+        let _ = AppendMenuW(
+            sub,
+            MF_STRING,
+            CMD_DESKTOP_BLANK,
+            PCWSTR(wide("新建空白栅栏").as_ptr()),
+        );
+        let _ = AppendMenuW(
+            sub,
+            MF_STRING,
+            CMD_DESKTOP_LINKED,
+            PCWSTR(wide("链接文件夹…").as_ptr()),
+        );
+        let _ = AppendMenuW(
+            sub,
+            MF_STRING,
+            CMD_DESKTOP_INBOX,
+            PCWSTR(wide("新建桌面收件箱").as_ptr()),
+        );
+        let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(
+            sub,
+            MF_STRING,
+            CMD_DESKTOP_CONSOLE,
+            PCWSTR(wide("打开控制中心").as_ptr()),
+        );
+        let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+        let toggle_label = if desktop_mode {
+            "切换回栅栏桌面"
+        } else {
+            "切换到原始桌面"
+        };
+        let _ = AppendMenuW(
+            sub,
+            MF_STRING,
+            CMD_DESKTOP_TOGGLE,
+            PCWSTR(wide(toggle_label).as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP | MF_STRING,
+            sub.0 as usize,
+            PCWSTR(wide("Sylva").as_ptr()),
+        );
+    }
+    let hinst = match unsafe { GetModuleHandleW(None) } {
+        Ok(m) => HINSTANCE(m.0),
+        Err(_) => {
+            unsafe {
+                let _ = DestroyMenu(menu);
+            }
+            return DesktopMenuResult::Failed;
+        }
+    };
+    if !ensure_menu_host_class(hinst) {
+        unsafe {
+            let _ = DestroyMenu(menu);
+        }
+        return DesktopMenuResult::Failed;
+    }
+    let host = match unsafe {
+        CreateWindowExW(
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
+            PCWSTR(wide(MENU_HOST_CLASS).as_ptr()),
+            PCWSTR::null(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            Some(hinst),
+            None,
+        )
+    } {
+        Ok(h) => h,
+        Err(_) => {
+            unsafe {
+                let _ = DestroyMenu(menu);
+            }
+            return DesktopMenuResult::Failed;
+        }
+    };
+    MENU_CTX2.with(|c| *c.borrow_mut() = Some(ctx2.clone()));
+    MENU_CTX3.with(|c| *c.borrow_mut() = ctx3);
+    let cmd = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+            sx,
+            sy,
+            Some(0),
+            host,
+            None,
+        )
+        .0 as usize
+    };
+    MENU_CTX2.with(|c| *c.borrow_mut() = None);
+    MENU_CTX3.with(|c| *c.borrow_mut() = None);
+    unsafe {
+        let _ = DestroyMenu(menu);
+        let _ = DestroyWindow(host);
+    }
+    match cmd {
+        CMD_DESKTOP_BLANK => DesktopMenuResult::AddBlank,
+        CMD_DESKTOP_LINKED => DesktopMenuResult::AddLinked,
+        CMD_DESKTOP_INBOX => DesktopMenuResult::AddInbox,
+        CMD_DESKTOP_CONSOLE => DesktopMenuResult::OpenConsole,
+        CMD_DESKTOP_TOGGLE => DesktopMenuResult::ToggleDesktop,
+        0 => DesktopMenuResult::Canceled,
+        c if (SHELL_CMD_FIRST as usize..=SHELL_CMD_LAST as usize).contains(&c) => {
+            let offset = (c - SHELL_CMD_FIRST as usize) as isize;
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+                fMask: 0,
+                hwnd,
+                lpVerb: PCSTR::from_raw(offset as *const u8),
+                lpParameters: PCSTR::null(),
+                lpDirectory: PCSTR::null(),
+                nShow: SW_SHOWNORMAL.0,
+                dwHotKey: 0,
+                hIcon: HANDLE::default(),
+            };
+            let _ = unsafe { ctx.InvokeCommand(&info) };
+            DesktopMenuResult::Invoked
+        }
+        _ => DesktopMenuResult::Canceled,
+    }
+}
+
+fn run_menu(
+    path: &str,
+    hwnd: HWND,
+    sx: i32,
+    sy: i32,
+    managed: bool,
+    desktop_mode: bool,
+) -> ShellMenuResult {
     let wide_path = wide(path);
     // 路径 → IShellItem → 默认上下文菜单
     let item: IShellItem = match unsafe {
@@ -313,36 +575,48 @@ fn run_menu(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMen
         return ShellMenuResult::Failed;
     }
 
-    // 顶部注入 Sylva 命令 + 分隔线；Shell 真实项从其后位置开始追加。
-    // Sylva 管理项跳过「移出栅栏」（与「删除」等价，见 `show` 文档）。
+    // 先放 Windows 原始 Shell 菜单，再追加一个「Sylva」子菜单；
+    // 不替换原菜单，用户仍可使用打开/复制/属性等系统功能。
+    // Sylva 管理项跳过「移出栅栏」（与「删除」等价，见 show 文档）。
     unsafe {
-        let mut pos = 0u32;
-        if !managed {
-            let _ = InsertMenuW(
-                menu,
-                pos,
-                MF_BYPOSITION | MF_STRING,
-                CMD_REMOVE,
-                PCWSTR(wide("移出栅栏").as_ptr()),
-            );
-            pos += 1;
-        }
-        let _ = InsertMenuW(
-            menu,
-            pos,
-            MF_BYPOSITION | MF_STRING,
-            CMD_RENAME,
-            PCWSTR(wide("重命名").as_ptr()),
-        );
-        let _ = InsertMenuW(
-            menu,
-            pos + 1,
-            MF_BYPOSITION | MF_SEPARATOR,
-            0,
-            PCWSTR::null(),
-        );
+        let pos = 0u32;
         // 追加 Shell 项；HRESULT 低 16 位为新增项数（忽略）
-        let _ = ctx2.QueryContextMenu(menu, pos + 2, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL);
+        let _ = ctx2.QueryContextMenu(menu, pos, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL);
+        // 删除只移除引用：隐藏 Shell 原生「删除」动词，避免它真实删除磁盘文件。
+        hide_shell_delete(menu, &ctx2, pos as usize);
+        let sub = CreatePopupMenu().unwrap_or_default();
+        if !sub.is_invalid() {
+            let remove_label = if managed {
+                "移除引用"
+            } else {
+                "移出栅栏"
+            };
+            let _ = AppendMenuW(
+                sub,
+                MF_STRING,
+                CMD_REMOVE,
+                PCWSTR(wide(remove_label).as_ptr()),
+            );
+            let _ = AppendMenuW(sub, MF_STRING, CMD_RENAME, PCWSTR(wide("重命名").as_ptr()));
+            let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+            let label = if desktop_mode {
+                "切换回栅栏桌面"
+            } else {
+                "切换到原始桌面"
+            };
+            let _ = AppendMenuW(
+                sub,
+                MF_STRING,
+                CMD_TOGGLE_DESKTOP,
+                PCWSTR(wide(label).as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_POPUP | MF_STRING,
+                sub.0 as usize,
+                PCWSTR(wide("Sylva").as_ptr()),
+            );
+        }
     }
 
     // 菜单 owner 用消息窗口：它负责把 owner-draw 消息转发给 IContextMenu2/3，
@@ -417,6 +691,7 @@ fn run_menu(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMen
     match cmd {
         CMD_REMOVE => ShellMenuResult::Remove,
         CMD_RENAME => ShellMenuResult::Rename,
+        CMD_TOGGLE_DESKTOP => ShellMenuResult::ToggleDesktop,
         c if (SHELL_CMD_FIRST as usize..=SHELL_CMD_LAST as usize).contains(&c) => {
             // 命令偏移量（低字），cast 成 LPSTR 即 MAKEINTRESOURCE 语义
             let offset = (c - SHELL_CMD_FIRST as usize) as isize;
