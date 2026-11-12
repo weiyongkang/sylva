@@ -22,6 +22,7 @@ mod logging;
 mod memory;
 mod scene;
 mod shell_menu;
+mod store;
 
 pub(crate) use std::cell::RefCell;
 pub(crate) use std::collections::HashMap;
@@ -64,12 +65,13 @@ pub(crate) use windows::Win32::UI::WindowsAndMessaging::{
 };
 pub(crate) use windows::core::{BOOL, PCWSTR, PWSTR};
 
-pub(crate) use sylva_core::config::ConfigStore;
+pub(crate) use sylva_core::config::AppSettings;
 pub(crate) use sylva_core::magnet::{FENCE_GAP, FreeSides, settle_move, settle_resize};
 pub(crate) use sylva_core::model::{
     Desk, Fence, FenceAppearance, FenceLayout, FenceState, FenceStyle, Icon, Rect, SidebarPosition,
     Vec2,
 };
+pub(crate) use sylva_core::storage::DeskStore;
 pub(crate) use sylva_render::{
     Compositor, ConsoleHit, ConsoleZone, FenceHit, GRID_CAPTION_H_MULT, GRIP_SIZE, HitModel,
     IconHit, ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene,
@@ -182,7 +184,7 @@ pub(crate) struct Runtime {
     /// 多屏时副屏在左/上可为负；主显示器工作区（`SPI_GETWORKAREA` 为屏幕坐标）
     /// 转虚拟坐标需减去它。显示拓扑变化时随 `DisplayChange` 更新。
     pub(crate) origin: (f32, f32),
-    pub(crate) store: ConfigStore,
+    pub(crate) store: Box<dyn DeskStore>,
     /// 当前悬停的图标（栅栏下标, 图标下标）；None = 无悬停。
     pub(crate) hover: Option<(usize, usize)>,
     /// 最近一次光标位置（虚拟屏幕物理坐标）；侧边栏 Dock 放大据此连续计算。
@@ -332,10 +334,12 @@ fn main() {
 }
 
 fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
-    // M0 桌面状态：加载/校验/回写，确保配置目录就绪
-    let store = ConfigStore::new(data_dir.to_path_buf());
-    let mut desk = store.load()?;
-    desk.validate();
+    // M0 桌面状态：加载/校验/回写，确保配置目录就绪。
+    // 存储后端由 `store::open` 选择（当前 JSON，后续 redb），加载结果已归一化。
+    let store = store::open(data_dir);
+    let mut desk = store
+        .load()?
+        .unwrap_or_else(|| Desk::new(AppSettings::default()));
     // 内部库文件夹（软件目录下）：粘贴/拖入的文件先物理复制进来，栅栏索引库内副本。
     // 库内文件被外部删除时，栅栏对应项同步移除（定时器 `SyncLibrary` 与启动时各清一次）。
     let library_dir = data_dir.join("library");

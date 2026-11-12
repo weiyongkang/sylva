@@ -1,10 +1,9 @@
-//! 应用级设置与持久化。
+//! 应用级设置与「加载后归一化」。
 //!
-//! 数据目录由上层注入（Windows 上为 `%APPDATA%\Sylva`），
-//! 核心层不感知平台路径，保持可测。
+//! 具体存储后端（JSON / redb）不在这里实现——见 `crate::storage` 的契约；
+//! 本模块只保留与平台无关的设置类型和版本迁移逻辑。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 use crate::model::Desk;
 
@@ -39,52 +38,13 @@ pub struct HotkeyConfig {
     pub search: Option<String>,
 }
 
-/// 配置读写器：负责 `Desk` 的加载、保存与版本迁移。
-pub struct ConfigStore {
-    dir: PathBuf,
-}
-
-impl ConfigStore {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
-    }
-
-    pub fn desk_path(&self) -> PathBuf {
-        self.dir.join("desk.json")
-    }
-
-    /// 加载桌面状态；文件不存在时返回默认值（不报错）。
-    pub fn load(&self) -> Result<Desk, crate::error::CoreError> {
-        let path = self.desk_path();
-        if !path.exists() {
-            return Ok(Desk::new(AppSettings::default()));
-        }
-        let raw = std::fs::read_to_string(&path)?;
-        let mut desk: Desk = serde_json::from_str(&raw)?;
-        migrate(&mut desk);
-        desk.validate();
-        Ok(desk)
-    }
-
-    /// 原子保存：先写临时文件再改名，避免崩溃造成配置损坏。
-    pub fn save(&self, desk: &Desk) -> Result<(), crate::error::CoreError> {
-        std::fs::create_dir_all(&self.dir)?;
-        let path = self.desk_path();
-        let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(desk)?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
-    /// 明确删除配置文件（用于「重置所有设置」）。
-    pub fn delete(&self) -> Result<(), crate::error::CoreError> {
-        let path = self.desk_path();
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        Ok(())
-    }
+/// 加载后的统一归一化：版本迁移 + 数据校验。
+///
+/// 所有存储后端（JSON / redb / 内存）在反序列化后都必须调用，保证迁移与校验只有一处实现。
+pub fn normalize(mut desk: Desk) -> Desk {
+    migrate(&mut desk);
+    desk.validate();
+    desk
 }
 
 /// 版本迁移：结构变化时在此按版本推进。
@@ -93,49 +53,4 @@ impl ConfigStore {
 fn migrate(desk: &mut Desk) {
     // v1：初始版本，暂无迁移逻辑。
     let _ = desk;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::Fence;
-
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("sylva-core-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn load_returns_default_when_missing() {
-        let store = ConfigStore::new(tmp_dir("missing"));
-        let desk = store.load().unwrap();
-        assert!(desk.fences.is_empty());
-    }
-
-    #[test]
-    fn save_load_roundtrip() {
-        let dir = tmp_dir("roundtrip");
-        let store = ConfigStore::new(dir.clone());
-        let mut desk = Desk::new(AppSettings::default());
-        desk.fences.push(Fence {
-            id: 1,
-            title: Some("工作".into()),
-            monitor_id: 0,
-            bounds: crate::model::Rect::new(0.0, 0.0, 300.0, 200.0),
-            state: crate::model::FenceState::Expanded,
-            icon_ids: Vec::new(),
-            appearance: crate::model::FenceAppearance::default(),
-            scroll: 0.0,
-            storage_path: None,
-            sidebar_collapsed: false,
-        });
-        store.save(&desk).unwrap();
-
-        let loaded = ConfigStore::new(dir).load().unwrap();
-        assert_eq!(loaded, desk);
-        assert_eq!(loaded.fences[0].title.as_deref(), Some("工作"));
-    }
 }

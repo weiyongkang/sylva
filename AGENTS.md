@@ -41,6 +41,7 @@ Windows 桌面**手动拖拽收纳**工具。用户可将桌面或资源管理�
 - **禁止**引入 `rusqlite` / `diesel` / `sqlx` / `sled` 或其他 SQL / 磁盘格式不稳定的存储依赖。
 - 配置与快照序列化格式：**JSON（`serde_json`）**。
 - **禁止**在 `shell` / `render` 层直接进行持久化文件 I/O；持久化统一经由 `core` 层的存储抽象。
+- **存储访问必须经 `sylva_core::storage::DeskStore` 契约**：`core` 只定义 trait、归一化与内存实现；JSON / redb 等后端在 `app` 层实现，`core` 不直接做文件 I/O。新增后端不得改动业务层调用点。
 - 非核心文件（配置导出、快照等）写入策略：**write temp → rename** 原子替换。
 - 存储位置、事务边界、快照与图标缓存的**具体规则**见需求文档 §4。
 
@@ -59,7 +60,7 @@ Windows 桌面**手动拖拽收纳**工具。用户可将桌面或资源管理�
 ```text
 crates/
 ├── core/     # 领域模型与纯逻辑：栅栏模型、收纳项、布局、磁吸、序列化、规则引擎。
-│             # 无 UI、无系统调用、无文件 I/O 实现（仅定义存储抽象 trait）。
+│             # 无 UI、无系统调用、无文件 I/O 实现（仅定义存储抽象 trait 与内存实现）。
 ├── shell/    # 系统集成：WorkerW/DefView 接管、COM、图标枚举、
 │             # OLE IDropTarget 拖放接收、文件系统操作。
 ├── render/   # 渲染：Overlay 窗口、D2D/DComp 合成、命中测试、拖拽悬停视觉反馈。
