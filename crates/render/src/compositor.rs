@@ -182,7 +182,7 @@ impl Compositor {
             self.ensure_covering(bbox, has_dock);
         }
         let frame = self.surface.begin_frame()?;
-        tracing::debug!("present: begin_frame 成功");
+        tracing::trace!("present: begin_frame 成功");
         {
             let target = frame.target();
             // 平移变换：把虚拟屏幕坐标映射进以 `surface_rect` 原点为 (0,0) 的表面。
@@ -192,7 +192,7 @@ impl Compositor {
             for (id, data) in uploads {
                 self.icons.insert_at(target, *id, data)?;
             }
-            tracing::debug!("present: 位图上传成功 {}", uploads.len());
+            tracing::trace!("present: 位图上传成功 {}", uploads.len());
             draw_scene(
                 target,
                 &self.device.d2d,
@@ -201,13 +201,24 @@ impl Compositor {
                 &self.icons,
                 &self.formats,
             )?;
-            tracing::debug!("present: draw_scene 成功");
+            tracing::trace!("present: draw_scene 成功");
         }
         frame.finish()?;
-        tracing::debug!("present: finish 成功");
+        tracing::trace!("present: finish 成功");
         self.sync_blurs(scene);
         self.device.compositor.RequestCommitAsync()?;
-        tracing::debug!("present: commit 成功");
+        tracing::trace!("present: commit 成功");
+        Ok(())
+    }
+
+    /// 主题（DPI/屏幕尺寸）变化后重算文本格式。
+    ///
+    /// 文本格式按字号创建、跨帧缓存；DPI 变化若只改 App 侧 `theme`，绘制仍用旧
+    /// 格式 → 字号/行高与布局脱节。这里让合成器与 App 用同一份主题。
+    pub fn set_theme(&mut self, theme: &Theme) -> Result<()> {
+        let formats = TextFormats::new(&self.device.dwrite, theme)?;
+        self.theme = theme.clone();
+        self.formats = formats;
         Ok(())
     }
 

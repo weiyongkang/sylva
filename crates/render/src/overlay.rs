@@ -169,6 +169,8 @@ pub struct IconHit {
     pub rect: RectF,
     pub fence: usize,
     pub icon: usize,
+    /// 该格是溢出格（九宫格缩略图）：点击 = 展开/收起，不打开文件。
+    pub overflow: bool,
 }
 
 /// 控制台面板内可点击的控件。
@@ -184,16 +186,21 @@ pub enum ConsoleZone {
     NavSystem,
     /// 栅栏管理页：选中第 `index` 个栅栏显示详情控制。
     FenceSelect(usize),
+    /// 网格单元格档位：小 / 中 / 大。
+    FenceCellSize(sylva_core::model::CellSize),
     /// 系统控制：快速隐藏全部栅栏。
     QuickHide,
     /// 系统控制：切换开机自启。
     ToggleAutostart,
     /// 系统控制：允许/禁止栅栏相互叠加。
     ToggleFenceOverlap,
+    /// 系统控制：栅栏间距 −/+（方向 ±1，步长由 App 决定）。
+    SettingGap(i32),
+    /// 系统控制：桌面留白 −/+。
+    SettingInset(i32),
     /// 系统控制：重置控制中心为屏幕 1/3 默认尺寸。
     ResetConsoleSize,
     FenceLayout(FenceLayout),
-    FenceIconSize(f32),
     FenceStyle(FenceStyle),
     /// 栅栏管理页：设置侧边栏停靠位置（仅 Sidebar 布局有效）。
     FenceSidebarPos(SidebarPosition),
@@ -202,6 +209,8 @@ pub enum ConsoleZone {
     FenceShowTitle(bool),
     /// 是否显示图标名称。
     FenceShowLabels(bool),
+    /// 网格容量不足时的处理方式：九宫格折叠 / 换行滚动。
+    FenceOverflow(sylva_core::model::OverflowMode),
     /// 图标显示形状：方角 / 圆角 / 圆形。
     FenceIconShape(sylva_core::model::IconShape),
     /// 图标悬停效果：关闭 / 高亮 / 放大。
@@ -250,6 +259,8 @@ pub struct HitModel {
     /// 当前内联编辑框矩形（浮于栅栏之上）：点击内部用于定位光标，不再落到
     /// 下面的栅栏/图标（否则会误触发「点击别处提交编辑」）。
     pub edit_rect: Option<RectF>,
+    /// 拖动/缩放时的对齐参考线条带（只并入窗口区域用于显示，不参与命中）。
+    pub guides: Vec<RectF>,
 }
 
 impl HitModel {
@@ -281,6 +292,10 @@ pub enum ResizeZone {
 pub enum OverlayEvent {
     /// 拖动标题栏移动栅栏：目标位置（左上角）。
     FenceMove { fence: usize, pos: (f32, f32) },
+    /// 单击栅栏标题（按下+松开且位移很小）：选中该栅栏，控制中心据此切页。
+    FenceClicked { fence: usize },
+    /// 双击栅栏标题：折叠 / 展开该栅栏。
+    FenceDoubleClicked { fence: usize },
     /// 拖边缘/角标缩放：目标矩形（左上角 x, y 与新宽高 w, h）与作用的边。
     FenceResize {
         fence: usize,
@@ -300,6 +315,22 @@ pub enum OverlayEvent {
     },
     /// 图标被拖出栅栏（位移超过阈值）：App 解析路径并调用 OLE `SHDoDragDrop`。
     IconDragOut { fence: usize, icon: usize },
+    /// 网格/列表内拖动图标排序：光标位置（App 据此算插入槽并出预览）。
+    GridReorderDrag {
+        fence: usize,
+        icon: usize,
+        mx: f32,
+        my: f32,
+    },
+    /// 网格/列表内排序松手：App 按落点计算最终槽位并落库。
+    GridReorderEnd {
+        fence: usize,
+        icon: usize,
+        mx: f32,
+        my: f32,
+    },
+    /// 点击溢出格（九宫格缩略图）：展开/收起该栅栏的全部图标。
+    OverflowClicked { fence: usize },
     /// 跨栅栏分类拖拽中：目标栅栏（None = 当前不在任何其他栅栏上）。
     IconClassifyDrag {
         from: usize,
@@ -373,8 +404,9 @@ pub enum OverlayEvent {
     ConsoleControlDrag { zone: ConsoleZone },
     /// 控制中心滑轨/网格拖动结束（持久化一次）。
     ConsoleControlDragEnd,
-    /// 在控制台面板上滚动滚轮（待办列表滚动）：`delta` 是滚轮原始刻度。
-    ConsoleScroll { delta: i32 },
+    /// 在控制台面板上滚动滚轮（待办列表滚动）：`delta` 是滚轮原始刻度，
+    /// `pos` 是光标位置（区分"滚栅栏列表"还是"滚右侧设置页"）。
+    ConsoleScroll { delta: i32, pos: (f32, f32) },
     /// 拖动控制台标题栏：目标左上角（虚拟屏幕坐标）。
     ConsoleMove { pos: (f32, f32) },
     /// 控制台拖动结束（App 在此持久化位置）。
@@ -462,6 +494,8 @@ enum DragKind {
     ConsoleResize(ResizeZone),
     /// 侧边栏图标拖动 → 重新排序。
     SidebarReorder,
+    /// 网格/列表内拖动图标 → 重排（松手才落库）。
+    GridReorder,
     /// 跨栅栏分类拖拽（目标栅栏；None = 暂未命中）。
     Classify { target: Option<usize> },
     /// 控制中心透明度滑轨拖动。
@@ -932,6 +966,10 @@ fn build_region(model: &HitModel) -> Option<HRGN> {
     if let Some(c) = &model.console {
         add_rect(&mut acc, c.rect);
     }
+    // 对齐参考线可能伸到所有栅栏之外：并入区域，否则会被窗口区域裁成一段。
+    for g in &model.guides {
+        add_rect(&mut acc, *g);
+    }
     acc
 }
 
@@ -1096,7 +1134,14 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(c) = &state.model.console
                     && c.rect.contains(px, py)
                 {
-                    emit_event(hwnd, state, OverlayEvent::ConsoleScroll { delta });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::ConsoleScroll {
+                            delta,
+                            pos: (px, py),
+                        },
+                    );
                     return LRESULT(0);
                 }
                 if let Some(f) = state.model.fences.iter().find(|f| f.body.contains(px, py)) {
@@ -1182,7 +1227,33 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
             let state = unsafe { &mut *ptr };
-            // 清空悬停 + 光标（清除 Dock 放大）
+            // SetWindowRgn 更新区域时会误发 WM_MOUSELEAVE：光标实际仍在栅栏/图标上时
+            // 不要清空悬停，否则会形成 HoverLeave→HoverEnter 的每帧循环（动画定时器
+            // 永不停止，CPU/日志暴涨，最终表现为应用无响应）。
+            let (cx, cy) = cursor_client(state);
+            if let Some(key) = hover_key(&state.model, cx, cy) {
+                if state.hovered != Some(key) {
+                    state.hovered = Some(key);
+                    match key {
+                        (f, Some(i)) => {
+                            emit_event(hwnd, state, OverlayEvent::HoverEnter { fence: f, icon: i })
+                        }
+                        _ => emit_event(hwnd, state, OverlayEvent::HoverLeave),
+                    }
+                }
+                state.last_cursor = Some((cx, cy));
+                unsafe {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tme);
+                }
+                return LRESULT(0);
+            }
+            // 真正离开：清空悬停 + 光标（清除 Dock 放大）
             state.hovered = None;
             state.console_hovered = None;
             state.last_cursor = None;
@@ -1985,6 +2056,28 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                     } else {
                         schedule_drag_out_timer(hwnd, state);
                     }
+                } else if moved2 > REORDER_THRESHOLD * REORDER_THRESHOLD {
+                    // 仍在源栅栏内且拖出一定距离：进入「栅栏内排序」，
+                    // 不再等待拖出（离开栅栏时下面 GridReorder 分支会切回拖出/分类）。
+                    cancel_drag_out_timer(hwnd, state);
+                    state.drag = Some(DragState {
+                        kind: DragKind::GridReorder,
+                        fence: drag.fence,
+                        start: drag.start,
+                        orig: drag.orig,
+                        pressed_icon: Some(icon_idx),
+                        ctrl: drag.ctrl,
+                    });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::GridReorderDrag {
+                            fence: drag.fence,
+                            icon: icon_idx,
+                            mx,
+                            my,
+                        },
+                    );
                 } else {
                     cancel_drag_out_timer(hwnd, state);
                 }
@@ -2041,6 +2134,54 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                     hwnd,
                     state,
                     OverlayEvent::SidebarReorderDrag {
+                        fence: drag.fence,
+                        icon: icon_idx,
+                        mx,
+                        my,
+                    },
+                );
+            }
+        }
+        DragKind::GridReorder => {
+            if let Some(icon_idx) = drag.pressed_icon {
+                // 拖到另一个栅栏 → 分类；离开源栅栏 → 拖出。语义与侧边栏排序一致。
+                if let Some(target) = other_fence_hit(&state.model, drag.fence, mx, my) {
+                    cancel_drag_out_timer(hwnd, state);
+                    state.drag = Some(DragState {
+                        kind: DragKind::Classify {
+                            target: Some(target.id),
+                        },
+                        fence: drag.fence,
+                        start: drag.start,
+                        orig: drag.orig,
+                        pressed_icon: Some(icon_idx),
+                        ctrl: is_ctrl_down(),
+                    });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::IconClassifyDrag {
+                            from: drag.fence,
+                            icon: icon_idx,
+                            to: Some(target.id),
+                            ctrl: is_ctrl_down(),
+                        },
+                    );
+                    return;
+                }
+                if outside_source(&state.model, drag.fence, mx, my) {
+                    if is_shift_down() || state.model.fences.len() <= 1 {
+                        begin_drag_out(hwnd, state, drag.fence, icon_idx);
+                    } else {
+                        schedule_drag_out_timer(hwnd, state);
+                    }
+                    return;
+                }
+                cancel_drag_out_timer(hwnd, state);
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::GridReorderDrag {
                         fence: drag.fence,
                         icon: icon_idx,
                         mx,
@@ -2183,6 +2324,27 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     cancel_drag_out_timer(hwnd, state);
     if let Some(drag) = state.drag.take() {
         let moved2 = (mx - drag.start.0).powi(2) + (my - drag.start.1).powi(2);
+        // 溢出格只响应"点击展开"，不参与拖动/拖出/排序（它不对应真实图标）。
+        if let Some(icon) = drag.pressed_icon
+            && drag.kind == DragKind::Move
+            && state
+                .model
+                .icons
+                .iter()
+                .any(|i| i.fence == drag.fence && i.icon == icon && i.overflow)
+        {
+            if moved2 < CLICK_DRAG_THRESHOLD * CLICK_DRAG_THRESHOLD {
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::OverflowClicked { fence: drag.fence },
+                );
+            }
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            return;
+        }
         let over_other = drag
             .pressed_icon
             .and_then(|_| other_fence_hit(&state.model, drag.fence, mx, my))
@@ -2195,7 +2357,10 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
             && moved2 > DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD
             && over_other.is_none()
             && outside
-            && matches!(drag.kind, DragKind::Move | DragKind::SidebarReorder)
+            && matches!(
+                drag.kind,
+                DragKind::Move | DragKind::SidebarReorder | DragKind::GridReorder
+            )
         {
             emit_event(
                 hwnd,
@@ -2214,7 +2379,10 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
         if let Some(to) = over_other
             && drag.pressed_icon.is_some()
             && moved2 > DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD
-            && matches!(drag.kind, DragKind::Move | DragKind::SidebarReorder)
+            && matches!(
+                drag.kind,
+                DragKind::Move | DragKind::SidebarReorder | DragKind::GridReorder
+            )
         {
             emit_event(
                 hwnd,
@@ -2240,23 +2408,62 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
             return;
         }
 
+        if drag.kind == DragKind::GridReorder {
+            // 栅栏内排序松手：把落点交给 App 计算最终槽位并落库。
+            emit_event(
+                hwnd,
+                state,
+                OverlayEvent::GridReorderEnd {
+                    fence: drag.fence,
+                    icon: drag.pressed_icon.unwrap_or_default(),
+                    mx,
+                    my,
+                },
+            );
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            return;
+        }
+
         if drag.kind == DragKind::Move {
             let dx = mx - drag.start.0;
             let dy = my - drag.start.1;
             let moved = dx * dx + dy * dy;
             let t = CLICK_DRAG_THRESHOLD;
-            if moved < t * t
-                && let Some(icon) = drag.pressed_icon
-            {
-                emit_event(
-                    hwnd,
-                    state,
-                    OverlayEvent::IconClicked {
-                        fence: drag.fence,
-                        icon,
-                        ctrl: drag.ctrl,
-                    },
-                );
+            if moved < t * t {
+                match drag.pressed_icon {
+                    Some(icon) => {
+                        let overflow = state
+                            .model
+                            .icons
+                            .iter()
+                            .any(|i| i.fence == drag.fence && i.icon == icon && i.overflow);
+                        if overflow {
+                            emit_event(
+                                hwnd,
+                                state,
+                                OverlayEvent::OverflowClicked { fence: drag.fence },
+                            );
+                        } else {
+                            emit_event(
+                                hwnd,
+                                state,
+                                OverlayEvent::IconClicked {
+                                    fence: drag.fence,
+                                    icon,
+                                    ctrl: drag.ctrl,
+                                },
+                            );
+                        }
+                    }
+                    // 标题/空白拖动但没有位移 = 单击栅栏：选中并联动控制中心。
+                    None => emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::FenceClicked { fence: drag.fence },
+                    ),
+                }
             }
         } else if let DragKind::Classify { target } = drag.kind {
             if let Some(icon) = drag.pressed_icon {
@@ -2370,13 +2577,33 @@ fn on_double_click(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     }
     for icon in &state.model.icons {
         if icon.rect.contains(mx, my) {
+            // 双击溢出格 = 展开/收起，不打开文件。
+            if icon.overflow {
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::OverflowClicked { fence: icon.fence },
+                );
+            } else {
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::IconDoubleClicked {
+                        fence: icon.fence,
+                        icon: icon.icon,
+                    },
+                );
+            }
+            return;
+        }
+    }
+    // 双击栅栏标题：折叠 / 展开（与单击选中、拖动移动互不冲突）。
+    for f in &state.model.fences {
+        if f.title.contains(mx, my) {
             emit_event(
                 hwnd,
                 state,
-                OverlayEvent::IconDoubleClicked {
-                    fence: icon.fence,
-                    icon: icon.icon,
-                },
+                OverlayEvent::FenceDoubleClicked { fence: f.id },
             );
             return;
         }
@@ -2617,6 +2844,7 @@ mod tests {
             icons: vec![],
             console: None,
             edit_rect: None,
+            guides: vec![],
         };
         let rgn = build_region(&model).expect("有栅栏就应有区域");
         unsafe {

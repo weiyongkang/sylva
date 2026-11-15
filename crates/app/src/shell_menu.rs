@@ -122,6 +122,35 @@ pub fn show(
 /// 启动时预热：把栅栏里已有文件类型的 Shell 扩展在后台加载并初始化。
 /// 每个类型挑一个真实路径做一次 `QueryContextMenu`（就是这一步加载扩展、
 /// 触发慢首次初始化），把成本移到用户交互之前。
+/// 后台预热桌面背景 Shell 菜单：把扩展首次加载/初始化成本移出 UI 线程。
+pub fn prime_desktop_startup() {
+    let _ = std::thread::Builder::new()
+        .name("sylva-desktop-menu-prime".into())
+        .spawn(|| {
+            let _ = sylva_shell::com::init();
+            let _ = std::panic::catch_unwind(|| {
+                let Ok(desktop) = (unsafe { SHGetDesktopFolder() }) else {
+                    return;
+                };
+                let Ok(ctx) =
+                    (unsafe { desktop.CreateViewObject::<IContextMenu2>(HWND::default()) })
+                else {
+                    return;
+                };
+                let menu = unsafe { CreatePopupMenu().unwrap_or_default() };
+                if menu.is_invalid() {
+                    return;
+                }
+                let _ = unsafe {
+                    ctx.QueryContextMenu(menu, 0, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL)
+                };
+                unsafe {
+                    let _ = DestroyMenu(menu);
+                }
+            });
+        });
+}
+
 pub fn prime_startup(paths: &[String]) {
     let keys = unique_type_keys(paths);
     if keys.is_empty() {

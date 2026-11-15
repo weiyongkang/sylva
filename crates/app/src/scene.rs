@@ -294,6 +294,7 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
             &rt.selected,
             rt.select_band,
             i,
+            rt.grid_peek == Some(i),
         );
         // 正在重命名栅栏标题/图标时，隐藏原始文字避免与编辑框重叠（编辑框独立绘制）
         if let Some(edit) = &rt.edit {
@@ -366,6 +367,30 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
         // 合成器据此建/删该栅栏的 BackdropBrush + GaussianBlurEffect 视觉（GPU 实时）。
         scene.fences.push(sf);
     }
+    // 栅栏内拖拽排序预览：只改渲染顺序（不落库），松手才写回 icon_ids。
+    if let Some((fence_idx, from, insert, mx, my)) = rt.grid_reorder
+        && let Some(sf) = scene.fences.get_mut(fence_idx)
+        && from < sf.icons.len()
+    {
+        let slots: Vec<(f32, f32)> = sf.icons.iter().map(|i| (i.x, i.y)).collect();
+        let dragged = sf.icons.remove(from);
+        let adj = (if insert > from { insert - 1 } else { insert }).min(sf.icons.len());
+        sf.icons.insert(adj, dragged);
+        for (k, ic) in sf.icons.iter_mut().enumerate() {
+            if k == adj {
+                continue;
+            }
+            if let Some((x, y)) = slots.get(k) {
+                ic.x = *x;
+                ic.y = *y;
+            }
+        }
+        sf.reorder_drag = Some(ReorderDrag {
+            icon_idx: adj,
+            cursor_x: mx,
+            cursor_y: my,
+        });
+    }
     // 侧边栏 Dock 放大（第二遍：全部栅栏真实几何已就绪，光标若落在其他栅栏内则
     // 不放大，避免影响半径越过网格/列表抢走它们的悬停焦点）。
     build_dock_magnify(rt, &mut scene.fences);
@@ -375,8 +400,14 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
         let c = build_console(rt, &rt.console_anim);
         rt.detail_scroll_max = c.detail_scroll_max;
         rt.detail_scroll = rt.detail_scroll.clamp(0.0, rt.detail_scroll_max);
+        rt.console_list_view = Some(c.fence_list_view);
+        rt.fence_scroll_max = c.fence_scroll_max;
+        rt.fence_scroll = rt.fence_scroll.clamp(0.0, rt.fence_scroll_max);
         scene.console = Some(c);
     }
+    // 拖动/缩放参考线与尺寸徽标：临时视觉，只在拖拽期间出现。
+    scene.guides = rt.guides.clone();
+    scene.hud = rt.hud.clone();
     // 内联编辑（最后绘制，浮于所有内容之上）
     scene.edit = rt.edit.as_ref().map(|e| SceneEdit {
         rect: e.rect,
@@ -469,19 +500,25 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
     };
     let list_top = content_top + row_h_f + 4.0 * s;
     let fence_n = desk.fences.len();
-    let fence_shown = fence_n.min(CONSOLE_FENCE_MAX_ROWS);
+    // 列表**占满**「系统控制」行与「＋ 添加栅栏」按钮之间的剩余高度：
+    // 行数能放多少放多少，放不下的部分滚动（滚轮/右侧滚动条）。
+    let add_h = CONSOLE_ADD_BTN_H * s;
+    let list_bottom = panel.y + panel.h - CONSOLE_PAD * s - add_h - 8.0 * s;
+    let list_h = (list_bottom - list_top).max(row_h_f);
+    // 能完整显示的行数（用于滚动上限；半行不参与计数，滚到底时刚好对齐）
+    let visible_rows = ((list_h / row_h_f).floor() as usize).max(1);
+    let fence_shown = fence_n.min(visible_rows);
     let fence_scroll_max = if fence_n > fence_shown {
         (fence_n - fence_shown) as f32 * row_h_f
     } else {
         0.0
     };
     let fence_scroll = rt.fence_scroll.clamp(0.0, fence_scroll_max);
-    let nav_bottom = panel.y + panel.h - 8.0 * s;
     let fence_list_view = RectF {
         x: nav_x,
         y: list_top,
         w: nav_w,
-        h: (nav_bottom - list_top).max(row_h_f),
+        h: list_h,
     };
     // —— 标题栏：关闭 ——
     let close = RectF {
@@ -684,6 +721,20 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
             h: btn_h,
         };
         row += 1;
+        // 溢出处理：九宫格折叠 / 换行滚动
+        let overflow_fold = RectF {
+            x: d.x + label_w,
+            y: row_y(row),
+            w: 64.0 * s,
+            h: btn_h,
+        };
+        let overflow_wrap = RectF {
+            x: overflow_fold.x + overflow_fold.w + 6.0 * s,
+            y: row_y(row),
+            w: 64.0 * s,
+            h: btn_h,
+        };
+        row += 1;
         // 图标形状：方角 / 圆角 / 圆形
         let shape_square = RectF {
             x: d.x + label_w,
@@ -802,7 +853,7 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
                 .unwrap_or_else(|| format!("栅栏 {}", sel + 1)),
             rename_btn,
             layout: app.layout,
-            icon_size: app.icon_size,
+            cell: app.cell,
             style: app.bg_style,
             tint: app.tint,
             layout_grid,
@@ -826,6 +877,9 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
             show_labels: app.show_labels,
             title_toggle,
             labels_toggle,
+            overflow: app.overflow,
+            overflow_fold,
+            overflow_wrap,
             grid_cols: app.grid_cols,
             grid_rows: app.grid_rows,
             cols_minus,
@@ -903,6 +957,26 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         w: sys_w,
         h: btn_h,
     };
+    // 通用常量行：间距 / 桌面留白（− / + 步进）
+    let setting_row = |k: f32| RectF {
+        x: content_x,
+        y: system_desktop.y + (btn_h + btn_gap) * k,
+        w: sys_w,
+        h: btn_h,
+    };
+    let system_gap_row = setting_row(5.0);
+    let system_inset_row = setting_row(6.0);
+    let small = 24.0 * s;
+    let step_btn = |row: RectF, right_offset: f32| RectF {
+        x: row.x + row.w - right_offset,
+        y: row.y + (btn_h - small) / 2.0,
+        w: small,
+        h: small,
+    };
+    let system_gap_minus = step_btn(system_gap_row, small * 2.0 + 8.0 * s);
+    let system_gap_plus = step_btn(system_gap_row, small);
+    let system_inset_minus = step_btn(system_inset_row, small * 2.0 + 8.0 * s);
+    let system_inset_plus = step_btn(system_inset_row, small);
     let desktop_toggle = system_desktop;
 
     SceneConsole {
@@ -912,6 +986,14 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         system_autostart,
         system_overlap,
         system_reset_size,
+        system_gap_row,
+        system_gap_minus,
+        system_gap_plus,
+        system_inset_row,
+        system_inset_minus,
+        system_inset_plus,
+        fence_gap: desk.settings.fence_gap,
+        desktop_inset: desk.settings.desktop_inset,
         page: rt.console_page,
         selected_fence: sel,
         x: panel.x,
@@ -923,6 +1005,8 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         desktop_toggle,
         fence_rows,
         fence_list_view,
+        fence_scroll,
+        fence_scroll_max,
         fence_detail,
         detail_view,
         detail_scroll_max,
@@ -973,33 +1057,30 @@ pub(crate) fn layout_fence(
     selected: &[(usize, usize)],
     select_band: Option<(usize, RectF)>,
     fence_idx: usize,
+    // 展开溢出格：true 时忽略容量、显示全部图标（点击九宫格缩略图后）。
+    expand_overflow: bool,
 ) -> SceneFence {
     let app = &fence.appearance;
     // 模型里的外观是 DIP 逻辑值（持久化，跨 DPI 稳定），布局时 × scale 变物理像素。
     let scale = theme.scale;
     let pad = app.padding * scale;
     let n = fence.icon_ids.len();
-    let title_block_h = if app.show_title {
-        theme.title.size * 1.6 + theme.title_padding_bottom
-    } else {
-        0.0
-    };
-    // 标题块 + 标题与内容之间的一份内边距；无标题时为 0。
-    // 这样 content_top = y + pad + header_extra，底部始终只留 pad，四边一致。
-    let header_extra = if app.show_title {
-        title_block_h + pad
-    } else {
-        0.0
-    };
-    // 侧边栏无标题栏：内容顶边 = 栅栏顶部 + 内边距。否则标题块高度会把顶部
+    // 单元格度量：档位同时决定格宽、格高、图标与名称行（布局/绘制/编辑框共用）。
+    let cell = sylva_core::layout::cell_metrics(app.cell, app.show_labels, scale);
+    // 标题带 = 半格高（放得下标题字为下限）：既不白白占掉一整格，又与网格同节奏。
+    let header_h =
+        sylva_core::layout::header_height(cell.cell_h, theme.fence_title.size, pad, app.show_title);
+    // 侧边栏无标题栏：内容顶边 = 栅栏顶部 + 内边距。否则标题带高度会把顶部
     // 图标整体裁掉（内容裁剪区从 content_top 起算，而侧边栏图标从 y+pad 起排）。
     let content_top = if app.layout == FenceLayout::Sidebar {
         fence.bounds.y + pad
     } else {
-        fence.bounds.y + pad + header_extra
+        fence.bounds.y + pad + header_h
     };
     let content_left = fence.bounds.x + pad;
     let inner_w = (fence.bounds.w - 2.0 * pad).max(1.0);
+    // 折叠态：只留标题带，不放内容（高度 = 上下 padding + 一格）。
+    let folded = fence.state == FenceState::Folded && app.show_title;
 
     // 预取名称 + 位图 + 详情列文本（布局与绘制共用）。
     let rows: Vec<(String, u64, String, String, String)> = fence
@@ -1035,54 +1116,117 @@ pub(crate) fn layout_fence(
     let (mut icons, scroll, scroll_max, scroll_view, list_cols, grid_cell_w, height) =
         match app.layout {
             FenceLayout::Grid => {
-                let icon_size = app.icon_size * scale;
-                let gap = app.gap * scale;
-                // 横向步距：图标 + 间距，且保底 ≥1.5×图标宽——旧配置 gap 偏小时两行
-                // 文件名标签也有足够横向空间（标签横跨整格绘制，见 draw.rs）。
-                let cell_w = grid_cell_w(icon_size, gap);
-                // 纵向步距：图标 + 标签间距 + 两行标签高（与 draw.rs 的标签框一致）；
-                // 隐藏名称时只留图标 + 行距。
-                let row_h = if app.show_labels {
-                    grid_row_h(theme, icon_size)
+                // 格宽/格高/图标全部来自档位：三档可预期，名称开关只改图标大小。
+                let nominal_w = cell.cell_w;
+                let row_h = cell.cell_h;
+                let auto_cols = ((inner_w / nominal_w).floor() as usize).max(1);
+                // 固定列数（8×8 选择器设定）是**硬约束**：列数不变，格宽在
+                // [图标 + 8, 档位格宽] 之间自适应。否则栅栏宽度差几像素就会
+                // 「静默少一列、图标挤到下一行」，与用户设定完全不符。
+                let (cols, cell_w) = if app.grid_cols > 0 {
+                    let cols = (app.grid_cols as usize).clamp(1, 64);
+                    // 列数固定时格宽**铺满**栅栏：2×2 就该是左右均分的两格，
+                    // 不能因为栅栏比"列数×标称格宽"宽就在右侧留一条空白。
+                    let min_w = (cell.icon + 8.0 * scale).min(nominal_w);
+                    (cols, (inner_w / cols as f32).max(min_w))
                 } else {
-                    icon_size + gap
-                };
-                let auto_cols = ((inner_w / cell_w).floor() as usize).max(1);
-                let cols = if app.grid_cols > 0 {
-                    (app.grid_cols as usize).clamp(1, auto_cols)
-                } else {
-                    auto_cols
+                    (auto_cols, nominal_w)
                 };
                 let rows_n = n.div_ceil(cols).max(1);
-                // 内容总高 = 每行（图标 + 标签）累加，末行标签也有高度
-                let content_full = rows_n as f32 * row_h;
+                // 可视容量（能真正摆下的格数）：
+                // - 设了可见行数 → 行数 × 列数；
+                // - 手动拉高的栅栏 → 按高度能放几行；
+                // - 自动高度 → 不限（栅栏会长高，不折叠）。
+                let manual_h = fence.bounds.h > 0.0 && app.grid_rows == 0;
+                let capacity = if folded {
+                    0
+                } else if app.grid_rows > 0 {
+                    (app.grid_rows.min(64) as usize) * cols
+                } else if manual_h {
+                    let v = (fence.bounds.h - pad - header_h - pad).max(0.0);
+                    ((v / row_h).floor() as usize).max(1) * cols
+                } else {
+                    usize::MAX
+                };
+                // 放不下时：最后一个可视格变成"溢出格"（九宫格缩略图），
+                // 点击展开（expand_overflow）时忽略容量、显示全部并滚动。
+                let overflowing = app.overflow == sylva_core::model::OverflowMode::Fold
+                    && !expand_overflow
+                    && capacity >= 2
+                    && n > capacity;
+                let shown = if overflowing { capacity - 1 } else { n };
+                let content_full = if overflowing {
+                    shown.div_ceil(cols).max(1) as f32 * row_h
+                } else {
+                    rows_n as f32 * row_h
+                };
                 // 固定可见行数：只影响自动高度，超出后滚动；0 = 全显示。
                 let visible_full = if app.grid_rows > 0 {
                     app.grid_rows.min(64) as f32 * row_h
                 } else {
                     content_full
                 };
-                let auto_h = pad + header_extra + visible_full + pad;
-                let h = if fence.bounds.h > 0.0 {
+                let auto_h = pad + header_h + visible_full + pad;
+                // 设了「可见行数」的栅栏，高度由行数派生（不采信持久化的旧高度）：
+                // 标题带/格高变化后若继续用旧高度，底部会空出一截（用户看到的
+                // 「右边比左边高、下面多一块」就是旧高度没跟着指标重算）。
+                let height_is_derived = app.grid_rows > 0;
+                let h = if folded {
+                    pad * 2.0 + header_h
+                } else if fence.bounds.h > 0.0 && !height_is_derived {
                     fence.bounds.h.max(MIN_FENCE_H)
                 } else {
                     auto_h
                 };
-                let view = (h - pad - header_extra - pad).max(0.0);
-                let scroll_max = (content_full - view).max(0.0);
+                let view = if folded {
+                    0.0
+                } else {
+                    (h - pad - header_h - pad).max(0.0)
+                };
+                // 亚像素舍入不算"可滚动"：否则自动高度/固定行列栅栏会冒出
+                // 一条无内容可滚的滚动条（用户可见的"假滚动条"）。
+                let scroll_max = if overflowing {
+                    0.0
+                } else {
+                    scroll_range(content_full, view)
+                };
                 let scroll = fence.scroll.clamp(0.0, scroll_max);
-                let icons = grid_icons(
-                    theme,
-                    fence,
-                    &rows,
-                    cols,
-                    cell_w,
-                    row_h,
-                    content_top,
-                    content_left,
-                    scroll,
-                    icon_size,
-                );
+                let mut icons = if folded {
+                    Vec::new()
+                } else {
+                    grid_icons(
+                        &rows[..shown.min(n)],
+                        cols,
+                        cell_w,
+                        &cell,
+                        content_top,
+                        content_left,
+                        scroll,
+                    )
+                };
+                if overflowing && !folded {
+                    // 溢出格放在最后一个可视槽位
+                    let idx = shown;
+                    let (row, col) = (idx / cols, idx % cols);
+                    let thumbs: Vec<u64> = rows[shown..].iter().take(9).map(|r| r.1).collect();
+                    icons.push(SceneIcon {
+                        label: String::new(),
+                        bitmap_id: u64::MAX,
+                        x: content_left + col as f32 * cell_w + (cell_w - cell.icon) / 2.0,
+                        y: content_top + row as f32 * row_h + cell.icon_top() - scroll,
+                        size: cell.icon,
+                        col_type: String::new(),
+                        col_modified: String::new(),
+                        col_size: String::new(),
+                        scale: 1.0,
+                        invalid: false,
+                        dragging: false,
+                        overflow: Some(sylva_render::scene::OverflowCell {
+                            count: n - shown,
+                            thumbs,
+                        }),
+                    });
+                }
                 (icons, scroll, scroll_max, view, None, cell_w, h)
             }
             FenceLayout::List => {
@@ -1096,7 +1240,7 @@ pub(crate) fn layout_fence(
                 } else {
                     list_icon + theme.list_row_gap
                 };
-                let header_h = if labels { label_h + 8.0 * scale } else { 0.0 };
+                let list_header_h = if labels { label_h + 8.0 * scale } else { 0.0 };
                 // 内容总高（所有行）
                 let content_full = if n > 0 {
                     n as f32 * row_h - theme.list_row_gap
@@ -1106,14 +1250,20 @@ pub(crate) fn layout_fence(
                 // 未手动缩放：最多显示 LIST_AUTO_ROWS 行，超出滚动
                 let auto_rows = n.clamp(1, LIST_AUTO_ROWS);
                 let auto_rows_h = (auto_rows as f32 * row_h - theme.list_row_gap).max(0.0);
-                let auto_h = pad + header_extra + header_h + auto_rows_h + pad;
-                let h = if fence.bounds.h > 0.0 {
+                let auto_h = pad + header_h + list_header_h + auto_rows_h + pad;
+                let h = if folded {
+                    pad * 2.0 + header_h
+                } else if fence.bounds.h > 0.0 {
                     fence.bounds.h.max(MIN_FENCE_H)
                 } else {
                     auto_h
                 };
-                let view = (h - pad - header_extra - header_h - pad).max(0.0);
-                let scroll_max = (content_full - view).max(0.0);
+                let view = if folded {
+                    0.0
+                } else {
+                    (h - pad - header_h - list_header_h - pad).max(0.0)
+                };
+                let scroll_max = scroll_range(content_full, view);
                 let scroll = fence.scroll.clamp(0.0, scroll_max);
                 // 四列：名称列吃剩余宽度，其余固定（列宽同样 × scale）
                 let type_w = LIST_TYPE_W * scale;
@@ -1128,24 +1278,28 @@ pub(crate) fn layout_fence(
                     type_x,
                     modified_x,
                     size_x,
-                    header_h,
+                    header_h: list_header_h,
                 };
-                let icons = list_icons(
-                    theme,
-                    fence,
-                    &rows,
-                    content_top,
-                    content_left,
-                    header_h,
-                    row_h,
-                    scroll,
-                    list_icon,
-                );
+                let icons = if folded {
+                    Vec::new()
+                } else {
+                    list_icons(
+                        theme,
+                        fence,
+                        &rows,
+                        content_top,
+                        content_left,
+                        list_header_h,
+                        row_h,
+                        scroll,
+                        list_icon,
+                    )
+                };
                 let list_cols = labels.then_some(cols);
                 (icons, scroll, scroll_max, view, list_cols, 0.0, h)
             }
             FenceLayout::Sidebar => {
-                let icon_size = app.icon_size * scale;
+                let icon_size = app.cell.icon() * scale;
                 let gap = app.gap * scale;
                 let is_vert = app.sidebar_pos != SidebarPosition::Top;
                 // 侧边栏：无标题栏、无标签，仅图标排列。间距用有效间距（放大不重叠）。
@@ -1251,7 +1405,7 @@ pub(crate) fn layout_fence(
     } else {
         [0.0, 0.0, 0.0, 0.45]
     };
-    let border_width = (MEDIUM_BORDER_WIDTH * scale).round().max(1.0);
+    let border_width = theme.fence_border_width.round().max(1.0);
 
     SceneFence {
         x: fence.bounds.x.round(),
@@ -1260,6 +1414,10 @@ pub(crate) fn layout_fence(
         height: height.round(),
         title: fence.title.clone().unwrap_or_default(),
         show_title: app.show_title,
+        padding: pad,
+        header_h,
+        caption_h: cell.caption_h,
+        caption_gap: cell.caption_gap,
         show_labels: app.show_labels,
         icon_shape: app.icon_shape,
         hover_effect: app.hover_effect,
@@ -1289,49 +1447,103 @@ pub(crate) fn layout_fence(
     }
 }
 
+/// 可滚动范围：扣掉亚像素舍入误差（< 0.5px 视为放得下）。
+///
+/// 自动高度按内容算、固定行列按格子算，两者都可能因为浮点/取整差 0.2~0.4px，
+/// 直接 `content - view` 会让栅栏画出一条"没有内容可滚"的滚动条。
+fn scroll_range(content: f32, view: f32) -> f32 {
+    let raw = content - view;
+    if raw > 0.5 { raw } else { 0.0 }
+}
+
+/// 光标落在的插入槽位（栅栏内拖拽排序用），范围 `0..=n`。
+///
+/// 光标在槽位右半边（列表为下半边）时插到该槽之后，左半边插到之前——
+/// 与资源管理器/桌面图标重排的手感一致。
+pub(crate) fn slot_index_at(theme: &Theme, fence: &Fence, mx: f32, my: f32) -> usize {
+    let app = &fence.appearance;
+    let s = theme.scale;
+    let pad = app.padding * s;
+    let n = fence.icon_ids.len();
+    if n == 0 {
+        return 0;
+    }
+    let cell = sylva_core::layout::cell_metrics(app.cell, app.show_labels, s);
+    let header_h =
+        sylva_core::layout::header_height(cell.cell_h, theme.fence_title.size, pad, app.show_title);
+    let content_top = fence.bounds.y + pad + header_h;
+    let content_left = fence.bounds.x + pad;
+    let inner_w = (fence.bounds.w - 2.0 * pad).max(1.0);
+    match app.layout {
+        FenceLayout::Grid => {
+            let auto_cols = ((inner_w / cell.cell_w).floor() as usize).max(1);
+            let (cols, cell_w) = if app.grid_cols > 0 {
+                let cols = (app.grid_cols as usize).clamp(1, 64);
+                let min_w = (cell.icon + 8.0 * s).min(cell.cell_w);
+                (cols, (inner_w / cols as f32).max(min_w))
+            } else {
+                (auto_cols, cell.cell_w)
+            };
+            let rel_y = (my - content_top + fence.scroll).max(0.0);
+            let row = (rel_y / cell.cell_h).floor() as usize;
+            let rel_x = (mx - content_left).max(0.0);
+            let col = ((rel_x / cell_w).floor() as usize).min(cols - 1);
+            let within = (rel_x - col as f32 * cell_w) / cell_w.max(1.0);
+            let slot = row * cols + col;
+            (if within > 0.5 { slot + 1 } else { slot }).min(n)
+        }
+        FenceLayout::List => {
+            let label_h = theme.label.size * 1.6;
+            let list_icon = LIST_ICON_SIZE * s;
+            let row_h = if app.show_labels {
+                list_icon.max(label_h) + theme.list_row_gap
+            } else {
+                list_icon + theme.list_row_gap
+            };
+            let list_header_h = if app.show_labels {
+                label_h + 8.0 * s
+            } else {
+                0.0
+            };
+            let rel = (my - content_top - list_header_h + fence.scroll).max(0.0);
+            let row = (rel / row_h).floor() as usize;
+            let within = (rel - row as f32 * row_h) / row_h.max(1.0);
+            (if within > 0.5 { row + 1 } else { row }).min(n)
+        }
+        FenceLayout::Sidebar => 0,
+    }
+}
+
 /// 网格排布全部图标位置（不裁剪；滚动用 `scroll` 平移，绘制时裁剪）。
-#[allow(clippy::too_many_arguments)]
+///
+/// 图标在格内水平居中；有名称时贴在格内上部，无名称时垂直居中——这样开关
+/// 名称只改图标大小，格子位置不变。
 pub(crate) fn grid_icons(
-    theme: &Theme,
-    _fence: &Fence,
     rows: &[(String, u64, String, String, String)],
     cols: usize,
     cell_w: f32,
-    row_h: f32,
+    cell: &sylva_core::layout::CellMetrics,
     content_top: f32,
     content_left: f32,
     scroll: f32,
-    icon_size: f32,
 ) -> Vec<SceneIcon> {
-    let _ = theme;
     rows.iter()
         .enumerate()
         .map(|(i, (label, bitmap, ct, cm, cs))| SceneIcon {
             label: label.clone(),
             bitmap_id: *bitmap,
-            // 图标在所在列内水平居中；标签/选中框也以该列中心对齐。
-            x: content_left + (i % cols) as f32 * cell_w + (cell_w - icon_size) / 2.0,
-            y: content_top + (i / cols) as f32 * row_h - scroll,
-            size: icon_size,
+            x: content_left + (i % cols) as f32 * cell_w + (cell_w - cell.icon) / 2.0,
+            y: content_top + (i / cols) as f32 * cell.cell_h + cell.icon_top() - scroll,
+            size: cell.icon,
             col_type: ct.clone(),
             col_modified: cm.clone(),
             col_size: cs.clone(),
             scale: 1.0,
             invalid: false,
             dragging: false,
+            overflow: None,
         })
         .collect()
-}
-
-/// 网格格宽：图标宽 + 间距，且不小于 1.5 倍图标宽。两行文件名标签横跨整格绘制，
-/// 格宽不足会退化成单行截断——保底保证旧配置（gap 偏小）也有足够的横向空间。
-pub(crate) fn grid_cell_w(icon_size: f32, gap: f32) -> f32 {
-    (icon_size + gap).max(icon_size * 1.5)
-}
-
-/// 网格行高：图标 + 标签间距 + 两行标签高（与 draw.rs 的标签框同一 `GRID_CAPTION_H_MULT`）。
-pub(crate) fn grid_row_h(theme: &Theme, icon_size: f32) -> f32 {
-    icon_size + theme.icon_caption_gap + theme.label.size * GRID_CAPTION_H_MULT
 }
 
 /// 列表排布全部图标位置（单列纵向；滚动用 `scroll` 平移，绘制时裁剪）。
@@ -1362,6 +1574,7 @@ pub(crate) fn list_icons(
             scale: 1.0,
             invalid: false,
             dragging: false,
+            overflow: None,
         })
         .collect()
 }
@@ -1415,7 +1628,7 @@ pub(crate) fn clamp_sidebar_work_rect(r: Rect, wa: Rect, pos: SidebarPosition) -
 /// 宽自适应但不超过工作区宽。`fence.appearance.sidebar_pos` 决定停靠在哪一侧。
 /// `wa` 为工作区矩形（扣除任务栏后），dock 不会越过任务栏。
 pub(crate) fn sidebar_dock_rect(scale: f32, fence: &Fence, wa: &Rect) -> Rect {
-    let icon_size = fence.appearance.icon_size * scale;
+    let icon_size = fence.appearance.cell.icon() * scale;
     let gap = fence.appearance.gap * scale;
     let pad = 12.0 * scale;
     let n = fence.icon_ids.len();
@@ -1480,6 +1693,7 @@ pub(crate) fn sidebar_icons(
                 scale: 1.0,
                 invalid: false,
                 dragging: false,
+                overflow: None,
             }
         })
         .collect()
@@ -1580,7 +1794,7 @@ pub(crate) fn build_dock_magnify(rt: &mut Runtime, scene_fences: &mut [SceneFenc
         if layout != FenceLayout::Sidebar || rt.desk.fences[i].appearance.hidden {
             continue;
         }
-        let icon_size = rt.desk.fences[i].appearance.icon_size * rt.theme.scale;
+        let icon_size = rt.desk.fences[i].appearance.cell.icon() * rt.theme.scale;
         let gap = rt.desk.fences[i].appearance.gap * rt.theme.scale;
         let effect = rt.desk.fences[i].appearance.hover_effect;
         let (mut hovered, mut scales) = sidebar_magnify(
@@ -1695,9 +1909,9 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, desk: &Desk) -> HitMo
             w: f.width,
             h: f.height,
         };
+        // 标题带 = padding + 一格高（与绘制同源，收起后整块仍可拖动）
         let title_h = if f.show_title {
-            (theme.title.size * 1.6 + theme.title_padding_bottom + 2.0 * theme.fence_padding)
-                .min(f.height)
+            (f.padding + f.header_h).min(f.height)
         } else {
             0.0
         };
@@ -1755,6 +1969,7 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, desk: &Desk) -> HitMo
                 rect,
                 fence: fi,
                 icon: ii,
+                overflow: icon.overflow.is_some(),
             });
         }
     }
@@ -1788,6 +2003,10 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, desk: &Desk) -> HitMo
                     zones.push((ConsoleZone::QuickHide, c.system_quick_hide));
                     zones.push((ConsoleZone::ToggleAutostart, c.system_autostart));
                     zones.push((ConsoleZone::ToggleFenceOverlap, c.system_overlap));
+                    zones.push((ConsoleZone::SettingGap(-1), c.system_gap_minus));
+                    zones.push((ConsoleZone::SettingGap(1), c.system_gap_plus));
+                    zones.push((ConsoleZone::SettingInset(-1), c.system_inset_minus));
+                    zones.push((ConsoleZone::SettingInset(1), c.system_inset_plus));
                     zones.push((ConsoleZone::ResetConsoleSize, c.system_reset_size));
                 }
                 ConsolePage::Fence => {
@@ -1812,9 +2031,18 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, desk: &Desk) -> HitMo
                             ConsoleZone::FenceSidebarPos(SidebarPosition::Right),
                             d.sidebar_right,
                         ));
-                        zones.push((ConsoleZone::FenceIconSize(32.0), d.size_s));
-                        zones.push((ConsoleZone::FenceIconSize(48.0), d.size_m));
-                        zones.push((ConsoleZone::FenceIconSize(64.0), d.size_l));
+                        zones.push((
+                            ConsoleZone::FenceCellSize(sylva_core::model::CellSize::Small),
+                            d.size_s,
+                        ));
+                        zones.push((
+                            ConsoleZone::FenceCellSize(sylva_core::model::CellSize::Medium),
+                            d.size_m,
+                        ));
+                        zones.push((
+                            ConsoleZone::FenceCellSize(sylva_core::model::CellSize::Large),
+                            d.size_l,
+                        ));
                         zones.push((ConsoleZone::FenceStyle(FenceStyle::Glass), d.style_glass));
                         zones.push((
                             ConsoleZone::FenceStyle(FenceStyle::Outline),
@@ -1832,6 +2060,14 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, desk: &Desk) -> HitMo
                         zones.push((
                             ConsoleZone::FenceShowLabels(!d.show_labels),
                             d.labels_toggle,
+                        ));
+                        zones.push((
+                            ConsoleZone::FenceOverflow(sylva_core::model::OverflowMode::Fold),
+                            d.overflow_fold,
+                        ));
+                        zones.push((
+                            ConsoleZone::FenceOverflow(sylva_core::model::OverflowMode::Wrap),
+                            d.overflow_wrap,
                         ));
                         zones.push((
                             ConsoleZone::FenceIconShape(sylva_core::model::IconShape::Square),
@@ -1895,12 +2131,35 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, desk: &Desk) -> HitMo
             zones,
         });
     }
+    // 参考线并入窗口区域（只用于显示，不参与命中）：2px 宽的细条。
+    let guides: Vec<RectF> = scene
+        .guides
+        .iter()
+        .map(|g| {
+            if g.vertical {
+                RectF {
+                    x: g.pos - 1.0,
+                    y: g.from.min(g.to),
+                    w: 2.0,
+                    h: (g.to - g.from).abs(),
+                }
+            } else {
+                RectF {
+                    x: g.from.min(g.to),
+                    y: g.pos - 1.0,
+                    w: (g.to - g.from).abs(),
+                    h: 2.0,
+                }
+            }
+        })
+        .collect();
     HitModel {
         fences,
         icons,
         console,
         // 内联编辑框浮于栅栏之上：overlay 据此把框内点击路由到 EditCaret（定位光标）
         edit_rect: scene.edit.as_ref().map(|e| e.rect),
+        guides,
     }
 }
 
@@ -1918,7 +2177,7 @@ mod tests {
             icon_ids: vec!["a".into(), "b".into(), "c".into()],
             appearance: FenceAppearance {
                 layout,
-                icon_size: 48.0,
+                cell: sylva_core::model::CellSize::Medium,
                 gap: 10.0,
                 ..FenceAppearance::default()
             },
@@ -1949,7 +2208,7 @@ mod tests {
             icon_ids,
             appearance: FenceAppearance {
                 layout: FenceLayout::Sidebar,
-                icon_size: 32.0,
+                cell: sylva_core::model::CellSize::Small,
                 gap: 4.0,
                 ..FenceAppearance::default()
             },
@@ -1961,7 +2220,17 @@ mod tests {
         };
         let theme = Theme::default();
         let bitmap_ids = std::collections::HashMap::new();
-        let scene = layout_fence(&theme, &fence, &desk, &bitmap_ids, None, &[], None, 0);
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &bitmap_ids,
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
         assert!(scene.scroll_max > 0.0, "20 个图标应超出 220px dock");
         assert!(scene.scroll > 0.0, "scroll 应被保留并钳制在可滚动范围");
         assert!(scene.icons[0].y < fence.bounds.y + 20.0);
@@ -1986,8 +2255,286 @@ mod tests {
     }
 
     #[test]
-    fn grid_icons_are_centered_in_columns() {
+    fn scroll_range_ignores_subpixel_rounding() {
+        assert_eq!(scroll_range(108.0, 108.0), 0.0);
+        // 0.3px 的舍入误差不应产生滚动条
+        assert_eq!(scroll_range(108.2, 107.9), 0.0);
+        // 真正放不下才可滚
+        assert!((scroll_range(200.0, 108.0) - 92.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fixed_rows_ignore_stale_height() {
+        use sylva_core::model::CellSize;
+        let desk = Desk::new(AppSettings::default());
         let theme = Theme::default();
+        let mut fence = test_fence(FenceLayout::Grid);
+        let (pad, show_title, show_labels, cell_size) = {
+            let app = &mut fence.appearance;
+            app.cell = CellSize::Medium;
+            app.grid_cols = 3;
+            app.grid_rows = 1;
+            (app.padding, app.show_title, app.show_labels, app.cell)
+        };
+        // 旧指标时代写死的过高高度
+        fence.bounds = Rect::new(0.0, 0.0, 240.0, 400.0);
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        let cell = sylva_core::layout::cell_metrics(cell_size, show_labels, 1.0);
+        let header =
+            sylva_core::layout::header_height(cell.cell_h, theme.fence_title.size, pad, show_title);
+        let expect = pad + header + cell.cell_h + pad;
+        assert!(
+            (scene.height - expect).abs() < 1.0,
+            "固定行数时高度必须按行数派生（实际 {} 期望 {}）",
+            scene.height,
+            expect
+        );
+        assert_eq!(scene.scroll_max, 0.0);
+    }
+
+    #[test]
+    fn manual_height_is_kept_without_fixed_rows() {
+        use sylva_core::model::CellSize;
+        let desk = Desk::new(AppSettings::default());
+        let theme = Theme::default();
+        let mut fence = test_fence(FenceLayout::Grid);
+        {
+            let app = &mut fence.appearance;
+            app.cell = CellSize::Medium;
+            app.grid_cols = 3;
+            app.grid_rows = 0;
+        }
+        fence.bounds = Rect::new(0.0, 0.0, 240.0, 400.0);
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        assert!((scene.height - 400.0).abs() < 1.0, "手动高度应保留");
+    }
+
+    #[test]
+    fn fixed_rows_fence_has_no_fake_scrollbar() {
+        use sylva_core::model::CellSize;
+        let desk = Desk::new(AppSettings::default());
+        let theme = Theme::default();
+        let mut fence = test_fence(FenceLayout::Grid);
+        let app = &mut fence.appearance;
+        app.cell = CellSize::Medium;
+        app.grid_cols = 3;
+        app.grid_rows = 1;
+        let cell = sylva_core::layout::cell_metrics(app.cell, app.show_labels, 1.0);
+        let pad = app.padding;
+        let header = sylva_core::layout::header_height(
+            cell.cell_h,
+            theme.fence_title.size,
+            pad,
+            app.show_title,
+        );
+        // resize_fence_to_grid 现在向上取整：高度刚好一行，不应有滚动范围
+        fence.bounds = Rect::new(0.0, 0.0, 240.0, (pad + header + cell.cell_h + pad).ceil());
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        assert_eq!(scene.scroll_max, 0.0, "刚好放下一行时不应出现假滚动条");
+    }
+
+    #[test]
+    fn fixed_columns_fill_fence_width() {
+        use sylva_core::model::CellSize;
+        let desk = Desk::new(AppSettings::default());
+        let theme = Theme::default();
+        let mut fence = test_fence(FenceLayout::Grid);
+        {
+            let app = &mut fence.appearance;
+            app.cell = CellSize::Medium;
+            app.grid_cols = 2;
+        }
+        fence.bounds = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        // 两列铺满内容宽（400 - 2*12 = 376）→ 每格 188，右侧不留空白
+        assert!(
+            (scene.grid_cell_w - 188.0).abs() < 0.01,
+            "cell_w={}",
+            scene.grid_cell_w
+        );
+        let second = &scene.icons[1];
+        let content_left = 12.0;
+        assert!(
+            (second.x + second.size / 2.0 - (content_left + 188.0 + 94.0)).abs() < 0.5,
+            "第二个图标应位于第二格中心"
+        );
+    }
+
+    #[test]
+    fn overflow_tile_folds_extra_icons_and_expands() {
+        use sylva_core::model::CellSize;
+        let desk = Desk::new(AppSettings::default());
+        let theme = Theme::default();
+        let mut fence = test_fence(FenceLayout::Grid);
+        fence.icon_ids = (0..5).map(|i| format!("i{i}")).collect();
+        {
+            let app = &mut fence.appearance;
+            app.cell = CellSize::Medium;
+            app.grid_cols = 3;
+            app.grid_rows = 1;
+        }
+        fence.bounds = Rect::new(0.0, 0.0, 300.0, 0.0);
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        assert_eq!(scene.icons.len(), 3, "1 行 3 列 = 2 个图标 + 1 个溢出格");
+        let last = scene.icons.last().unwrap();
+        let ov = last.overflow.as_ref().expect("最后一格应是溢出格");
+        assert_eq!(ov.count, 3);
+        assert_eq!(scene.scroll_max, 0.0, "折叠成溢出格后不再滚动");
+
+        let expanded = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            true,
+        );
+        assert_eq!(expanded.icons.len(), 5, "展开后显示全部图标");
+        assert!(expanded.icons.iter().all(|i| i.overflow.is_none()));
+        assert!(expanded.scroll_max > 0.0, "展开后放不下才滚动");
+    }
+
+    #[test]
+    fn overflow_wrap_mode_keeps_all_icons_scrollable() {
+        use sylva_core::model::{CellSize, OverflowMode};
+        let desk = Desk::new(AppSettings::default());
+        let theme = Theme::default();
+        let mut fence = test_fence(FenceLayout::Grid);
+        fence.icon_ids = (0..5).map(|i| format!("i{i}")).collect();
+        {
+            let app = &mut fence.appearance;
+            app.cell = CellSize::Medium;
+            app.grid_cols = 3;
+            app.grid_rows = 1;
+            app.overflow = OverflowMode::Wrap;
+        }
+        fence.bounds = Rect::new(0.0, 0.0, 300.0, 0.0);
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        assert_eq!(scene.icons.len(), 5, "换行模式不折叠，全部图标都在");
+        assert!(scene.icons.iter().all(|i| i.overflow.is_none()));
+        assert!(scene.scroll_max > 0.0, "放不下时靠滚动");
+    }
+
+    #[test]
+    fn fixed_columns_compress_cells_instead_of_wrapping() {
+        let desk = Desk::new(AppSettings::default());
+        let mut fence = test_fence(FenceLayout::Grid);
+        fence.appearance.cell = sylva_core::model::CellSize::Medium;
+        fence.appearance.grid_cols = 3;
+        // 宽度只够 3×72：档位格宽 80 放不下，但固定列数必须保持 3 列（压缩格宽）
+        fence.bounds = Rect::new(0.0, 0.0, 240.0, 300.0);
+        let theme = Theme::default();
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        assert_eq!(scene.icons.len(), 3);
+        let y0 = scene.icons[0].y;
+        for ic in &scene.icons {
+            assert!((ic.y - y0).abs() < 0.01, "固定列数时三个图标应在同一行");
+        }
+        assert!(
+            scene.grid_cell_w < 80.0,
+            "格宽应压缩到栅栏内（实际 {}）",
+            scene.grid_cell_w
+        );
+    }
+
+    #[test]
+    fn auto_columns_keep_nominal_cell_width() {
+        let desk = Desk::new(AppSettings::default());
+        let mut fence = test_fence(FenceLayout::Grid);
+        fence.appearance.cell = sylva_core::model::CellSize::Medium;
+        fence.appearance.grid_cols = 0;
+        fence.bounds = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let theme = Theme::default();
+        let scene = layout_fence(
+            &theme,
+            &fence,
+            &desk,
+            &HashMap::new(),
+            None,
+            &[],
+            None,
+            0,
+            false,
+        );
+        // 自动列数：格宽保持档位值（80），列数随宽度变化
+        assert!((scene.grid_cell_w - 80.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn grid_icons_are_centered_in_columns() {
         let rows = vec![
             (
                 "a".to_string(),
@@ -2004,20 +2551,14 @@ mod tests {
                 String::new(),
             ),
         ];
-        let icons = grid_icons(
-            &theme,
-            &test_fence(FenceLayout::Grid),
-            &rows,
-            2,
-            100.0,
-            50.0,
-            0.0,
-            10.0,
-            0.0,
-            32.0,
-        );
-        assert_eq!(icons[0].x, 44.0);
-        assert_eq!(icons[1].x, 144.0);
+        let cell = sylva_core::layout::cell_metrics(sylva_core::model::CellSize::Medium, true, 1.0);
+        let icons = grid_icons(&rows, 2, cell.cell_w, &cell, 0.0, 10.0, 0.0);
+        // 图标在 80px 宽格内水平居中：10 + (80-48)/2 = 26
+        assert_eq!(icons[0].x, 26.0);
+        assert_eq!(icons[1].x, 26.0 + 80.0);
+        // 固定列数时格宽自适应：同样的两列，格宽窄于档位时图标仍居中
+        let narrow = grid_icons(&rows, 2, 60.0, &cell, 0.0, 10.0, 0.0);
+        assert_eq!(narrow[0].x, 10.0 + (60.0 - 48.0) / 2.0);
     }
 
     #[test]
@@ -2192,6 +2733,7 @@ mod tests {
             scale: 1.0,
             invalid: false,
             dragging: false,
+            overflow: None,
         }
     }
 

@@ -2,9 +2,20 @@
 //!
 //! 坐标全部为**物理像素**（虚拟屏幕坐标），与 overlay 窗口客户端坐标一致。
 
-use sylva_core::model::{FenceLayout, FenceStyle, HoverEffect, IconShape, SidebarPosition};
+use sylva_core::model::{
+    CellSize, FenceLayout, FenceStyle, HoverEffect, IconShape, SidebarPosition,
+};
 
 use crate::overlay::{ConsoleZone, RectF};
+
+/// 溢出格：可视容量放不下的图标折叠成一格九宫格缩略图。
+#[derive(Debug, Clone, Default)]
+pub struct OverflowCell {
+    /// 被折叠的图标数量。
+    pub count: usize,
+    /// 缩略图位图 ID（最多 9 个，按 3×3 平铺）。
+    pub thumbs: Vec<u64>,
+}
 
 /// 栅栏内的一个图标（位置由 App 层按主题网格/列表排布后填入）。
 #[derive(Debug, Clone)]
@@ -27,6 +38,8 @@ pub struct SceneIcon {
     pub invalid: bool,
     /// OLE 拖出进行中：原位降透明度显示（拖放源视觉反馈）。
     pub dragging: bool,
+    /// 溢出格（Some = 该格画九宫格缩略图 + 计数，点击展开）。
+    pub overflow: Option<OverflowCell>,
 }
 
 /// 列表布局的详情列位置（绝对虚拟屏幕 x；名称列紧贴图标右侧，不入列）。
@@ -49,6 +62,14 @@ pub struct SceneFence {
     pub title: String,
     /// 是否显示标题文字（false 时标题栏仍是拖动把手）。
     pub show_title: bool,
+    /// 栅栏四边内边距（物理像素，唯一来源：标题、内容区、滚动条、裁剪共用）。
+    pub padding: f32,
+    /// 标题带高度（物理像素）= 一个网格单元格高；无标题时为 0。
+    pub header_h: f32,
+    /// 网格名称行高（物理像素；不显示名称时为 0）。
+    pub caption_h: f32,
+    /// 图标与名称之间的间距（物理像素；不显示名称时为 0）。
+    pub caption_gap: f32,
     /// 是否显示图标名称标签。
     pub show_labels: bool,
     /// 图标形状：方角 / 圆角 / 圆形。
@@ -173,14 +194,15 @@ pub struct SceneFenceDetail {
     pub rename_btn: RectF,
     /// 当前值（绘制时高亮对应分段按钮 / 色板项）。
     pub layout: FenceLayout,
-    pub icon_size: f32,
+    /// 网格单元格档位（小 / 中 / 大）。
+    pub cell: CellSize,
     pub style: FenceStyle,
     pub tint: Option<[f32; 3]>,
     /// 布局：网格 / 列表 / 侧边栏
     pub layout_grid: RectF,
     pub layout_list: RectF,
     pub layout_sidebar: RectF,
-    /// 图标大小：小 / 中 / 大
+    /// 单元格档位：小 / 中 / 大
     pub size_s: RectF,
     pub size_m: RectF,
     pub size_l: RectF,
@@ -205,6 +227,10 @@ pub struct SceneFenceDetail {
     pub show_labels: bool,
     pub title_toggle: RectF,
     pub labels_toggle: RectF,
+    /// 溢出处理：九宫格折叠 / 换行滚动。
+    pub overflow: sylva_core::model::OverflowMode,
+    pub overflow_fold: RectF,
+    pub overflow_wrap: RectF,
     /// 网格固定列/行数（0 = 自动）。
     pub grid_cols: u32,
     pub grid_rows: u32,
@@ -265,10 +291,22 @@ pub struct SceneConsole {
     pub system_autostart: RectF,
     pub system_overlap: RectF,
     pub system_reset_size: RectF,
+    /// 通用常量：栅栏间距 / 桌面留白（行 + −/+ 按钮）。
+    pub system_gap_row: RectF,
+    pub system_gap_minus: RectF,
+    pub system_gap_plus: RectF,
+    pub system_inset_row: RectF,
+    pub system_inset_minus: RectF,
+    pub system_inset_plus: RectF,
+    pub fence_gap: f32,
+    pub desktop_inset: f32,
     /// 栅栏管理页：可点选栅栏行（与 `desk.fences` 平行）。
     pub fence_rows: Vec<SceneFenceRow>,
     /// 栅栏管理页：列表可视区（行超出部分被裁剪，命中模型据此跳过不可见行）。
     pub fence_list_view: RectF,
+    /// 栅栏列表滚动偏移与可滚动范围（绘制滚动条 + 滚轮判定用）。
+    pub fence_scroll: f32,
+    pub fence_scroll_max: f32,
     /// 栅栏管理页：选中栅栏的详情控制区。
     pub fence_detail: Option<SceneFenceDetail>,
     /// 右侧详情的可视裁剪区与可滚动范围。
@@ -306,6 +344,30 @@ pub struct SceneEdit {
     pub comp: String,
 }
 
+/// 对齐参考线（虚拟屏幕坐标）：拖动/缩放栅栏时与邻居或屏幕对齐的位置。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GuideLine {
+    /// true = 竖线（对齐 x），false = 横线（对齐 y）。
+    pub vertical: bool,
+    /// 线的位置（x 或 y，物理像素）。
+    pub pos: f32,
+    /// 线的起止（另一轴的区间）。
+    pub from: f32,
+    pub to: f32,
+}
+
+/// 拖拽/缩放时的尺寸徽标（如 `320 × 240`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneHud {
+    pub text: String,
+    /// 徽标左上角（物理像素）。
+    pub x: f32,
+    pub y: f32,
+    /// 徽标尺寸（物理像素；由 App 按文本估算，绘制与合成表面共用）。
+    pub w: f32,
+    pub h: f32,
+}
+
 /// 整屏场景（虚拟屏幕）。
 #[derive(Debug, Default)]
 pub struct Scene {
@@ -317,6 +379,10 @@ pub struct Scene {
     pub edit: Option<SceneEdit>,
     /// 控制台面板（插件宿主）；None = 本帧不画。
     pub console: Option<SceneConsole>,
+    /// 对齐参考线（拖动/缩放中；空闲时为空）。
+    pub guides: Vec<GuideLine>,
+    /// 尺寸徽标（拖动/缩放中；空闲时 None）。
+    pub hud: Option<SceneHud>,
 }
 
 impl Scene {
@@ -327,6 +393,8 @@ impl Scene {
             fences: Vec::new(),
             edit: None,
             console: None,
+            guides: Vec::new(),
+            hud: None,
         }
     }
 
@@ -339,7 +407,32 @@ impl Scene {
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
         let mut any = false;
+        for g in &self.guides {
+            if g.vertical {
+                min_x = min_x.min(g.pos);
+                max_x = max_x.max(g.pos);
+                min_y = min_y.min(g.from);
+                max_y = max_y.max(g.to);
+            } else {
+                min_y = min_y.min(g.pos);
+                max_y = max_y.max(g.pos);
+                min_x = min_x.min(g.from);
+                max_x = max_x.max(g.to);
+            }
+            any = true;
+        }
+        if let Some(h) = &self.hud {
+            min_x = min_x.min(h.x);
+            min_y = min_y.min(h.y);
+            max_x = max_x.max(h.x + h.w);
+            max_y = max_y.max(h.y + h.h);
+            any = true;
+        }
         for f in &self.fences {
+            // 隐藏的栅栏不占合成表面：否则一个远处被隐藏的栅栏会把整块表面撑大。
+            if f.hidden {
+                continue;
+            }
             min_x = min_x.min(f.x);
             min_y = min_y.min(f.y);
             max_x = max_x.max(f.x + f.width);
@@ -384,6 +477,10 @@ mod tests {
             height: 80.0,
             title: "测试".into(),
             show_title: true,
+            padding: 12.0,
+            header_h: 40.0,
+            caption_h: 16.0,
+            caption_gap: 4.0,
             show_labels: true,
             icon_shape: IconShape::Square,
             hover_effect: HoverEffect::Scale,
@@ -456,6 +553,26 @@ mod tests {
         assert_eq!(c.type_x, 200.0);
         assert!(c.size_x > c.modified_x);
         assert_eq!(c.header_h, 26.0);
+    }
+
+    #[test]
+    fn content_rect_skips_hidden_fences() {
+        let mut s = Scene::new(3072.0, 1920.0);
+        let visible = test_fence();
+        let hidden = SceneFence {
+            x: 2000.0,
+            y: 1000.0,
+            width: 500.0,
+            height: 500.0,
+            hidden: true,
+            ..test_fence()
+        };
+        s.fences = vec![visible, hidden];
+        let r = s.content_rect().expect("可见栅栏应产生包围盒");
+        // 隐藏栅栏不占位：包围盒只覆盖可见那一个
+        assert!((r.x - 10.0).abs() < 0.01);
+        assert!((r.w - 100.0).abs() < 0.01);
+        assert!((r.h - 80.0).abs() < 0.01);
     }
 
     #[test]

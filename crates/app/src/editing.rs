@@ -633,26 +633,30 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
     f.icon_ids.get(icon)?;
     let s = rt.theme.scale;
     let pad = f.appearance.padding * s;
-    let title_block_h = rt.theme.title.size * 1.6 + rt.theme.title_padding_bottom;
-    let content_top = f.bounds.y + pad + title_block_h + pad;
+    // 与 layout_fence 同口径：标题带 = 半格高，单元格度量来自档位。
+    let cell = sylva_core::layout::cell_metrics(f.appearance.cell, f.appearance.show_labels, s);
+    let header_h = sylva_core::layout::header_height(
+        cell.cell_h,
+        rt.theme.fence_title.size,
+        pad,
+        f.appearance.show_title,
+    );
+    let content_top = f.bounds.y + pad + header_h;
     let content_left = f.bounds.x + pad;
     let inner_w = (f.bounds.w - 2.0 * pad).max(1.0);
     match f.appearance.layout {
         FenceLayout::Grid => {
-            let icon_size = f.appearance.icon_size * s;
-            // 与 scene.rs 同口径：格宽保底 + 两行标签行高（否则编辑框/后续行错位）。
-            let cell_w = grid_cell_w(icon_size, f.appearance.gap * s);
-            let row_h = grid_row_h(&rt.theme, icon_size);
+            let cell_w = cell.cell_w;
+            let row_h = cell.cell_h;
             let cols = ((inner_w / cell_w).floor() as usize).max(1);
             let ix = content_left + (icon % cols) as f32 * cell_w;
             let iy = content_top + (icon / cols) as f32 * row_h - f.scroll;
-            // 编辑框覆盖两行标签区（含上下剪裁余量 8·scale，见 draw_inline_edit 的 4·scale 内缩）。
-            let edit_h = rt.theme.label.size * GRID_CAPTION_H_MULT + 8.0 * s;
+            // 编辑框覆盖名称行（加 8·scale 上下余量，见 draw_inline_edit 的 4·scale 内缩）。
             Some(RectF {
-                x: ix - 2.0,
-                y: iy + icon_size + rt.theme.icon_caption_gap,
-                w: cell_w - 2.0,
-                h: edit_h,
+                x: ix + 2.0,
+                y: iy + cell.icon_top() + cell.icon + cell.caption_gap,
+                w: (cell_w - 4.0).max(24.0),
+                h: cell.caption_h + 8.0 * s,
             })
         }
         FenceLayout::List => {
@@ -679,7 +683,7 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
             // 侧边栏无内联标签：编辑框放在图标旁侧，复用工具提示的定位口径
             // （纵向 dock 放图标右侧/左侧、垂直居中；横向 dock 放图标下方、水平居中）。
             let pos = f.appearance.sidebar_pos;
-            let icon_size = f.appearance.icon_size * s;
+            let icon_size = f.appearance.cell.icon() * s;
             let eff_gap = f.appearance.gap * s + icon_size * 0.5;
             let (icon_x, icon_y) = if pos == SidebarPosition::Top {
                 // 横向 dock：厚度 = 紧贴放大图标，图标垂直居中，排布自左往右
@@ -738,13 +742,25 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
 /// 栅栏标题文本矩形（就地编辑框的定位基准）。
 pub(crate) fn fence_title_rect(rt: &Runtime, fence: usize) -> RectF {
     let f = &rt.desk.fences[fence];
-    let pad = rt.theme.fence_padding;
+    let pad = f.appearance.padding * rt.theme.scale;
     // 编辑框按实际绘制字号（`draw_inline_edit` 恒用 label 格式）定高：
     // 文本行高 + 上下剪裁余量（绘制时内缩 4·scale），字形完整显示且垂直居中。
     let h = rt.theme.label.size * 1.6 + 8.0 * rt.theme.scale;
+    // 标题带 = 半格高，标题文字在带内水平+垂直居中（与绘制同源）。
+    let cell = sylva_core::layout::cell_metrics(
+        f.appearance.cell,
+        f.appearance.show_labels,
+        rt.theme.scale,
+    );
+    let header_h = sylva_core::layout::header_height(
+        cell.cell_h,
+        rt.theme.fence_title.size,
+        pad,
+        f.appearance.show_title,
+    );
     RectF {
         x: f.bounds.x + pad,
-        y: f.bounds.y + pad,
+        y: f.bounds.y + pad + ((header_h - h) / 2.0).max(0.0),
         w: (f.bounds.w - 2.0 * pad).max(1.0),
         h,
     }

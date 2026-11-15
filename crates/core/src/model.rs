@@ -217,6 +217,106 @@ impl SidebarPosition {
     }
 }
 
+/// 网格单元格档位（小 / 中 / 大）。
+///
+/// v4 起替代裸 `icon_size`：一个档位同时决定格宽、格高、图标边长与名称行，
+/// 保证三档可预期，且切换「显示名称」只改图标大小、不重排格子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellSize {
+    /// 紧凑：格 64×64，图标 32。
+    Small,
+    /// 默认：格 80×80，图标 48。
+    #[default]
+    Medium,
+    /// 大：格 104×96，图标 64。
+    Large,
+}
+
+impl CellSize {
+    /// 三档（控制中心按此顺序渲染按钮）。
+    pub const ALL: [CellSize; 3] = [Self::Small, Self::Medium, Self::Large];
+    /// 格内上下留白（逻辑 px）。
+    pub const PAD_V: f32 = 6.0;
+    /// 图标与名称之间的间距（逻辑 px）。
+    pub const CAPTION_GAP: f32 = 4.0;
+    /// 名称行高（逻辑 px，12px 字 + 4 行距）。
+    pub const CAPTION_H: f32 = 16.0;
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "小",
+            Self::Medium => "中",
+            Self::Large => "大",
+        }
+    }
+
+    /// 单元格宽（逻辑 px）。
+    pub const fn cell_w(self) -> f32 {
+        match self {
+            Self::Small => 64.0,
+            Self::Medium => 80.0,
+            Self::Large => 104.0,
+        }
+    }
+
+    /// 单元格高（逻辑 px）。与名称开关无关——这是"三档可预期"的前提。
+    pub const fn cell_h(self) -> f32 {
+        match self {
+            Self::Small => 64.0,
+            Self::Medium => 80.0,
+            Self::Large => 96.0,
+        }
+    }
+
+    /// 显示名称时的图标边长（逻辑 px）。
+    pub const fn icon(self) -> f32 {
+        match self {
+            Self::Small => 32.0,
+            Self::Medium => 48.0,
+            Self::Large => 64.0,
+        }
+    }
+
+    /// 隐藏名称时的图标边长：最多放大 25%，且不溢出色块。
+    pub fn icon_without_labels(self) -> f32 {
+        (self.icon() * 1.25)
+            .min(self.cell_w() - 12.0)
+            .min(self.cell_h() - 8.0)
+    }
+
+    /// 旧版 `icon_size`（32/48/64）→ 最近档位。
+    pub fn nearest(icon: f32) -> Self {
+        if icon < 40.0 {
+            Self::Small
+        } else if icon < 56.0 {
+            Self::Medium
+        } else {
+            Self::Large
+        }
+    }
+}
+
+/// 网格容量不足时的处理方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowMode {
+    /// 折叠成九宫格缩略图（点击展开）。
+    #[default]
+    Fold,
+    /// 换行并滚动（不折叠）。
+    Wrap,
+}
+
+impl OverflowMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fold => "九宫格",
+            Self::Wrap => "换行",
+        }
+    }
+}
+
 /// 栅栏外观配置。
 ///
 /// `#[serde(default)]`：旧版 `desk.json` 缺少新增字段时自动取默认值，
@@ -226,25 +326,21 @@ impl SidebarPosition {
 pub struct FenceAppearance {
     /// 背景色 RGBA（0.0..=1.0）；描边模式下不使用。
     pub bg_color: [f32; 4],
-    /// 圆角半径（逻辑 px）。
-    pub corner_radius: f32,
-    /// 是否启用亚克力毛玻璃（Win11 生效，Win10 降级半透明）。
-    pub acrylic: bool,
-    /// 标题栏高度（逻辑 px）。
-    pub title_bar_height: f32,
-    /// 栅栏内边距。
+    /// 栅栏内边距（逻辑 px，四边同一份；标题与内容区共用）。
     pub padding: f32,
-    /// 图标尺寸（逻辑 px）。
-    pub icon_size: f32,
-    /// 图标间距（逻辑 px）。
+    /// 网格单元格档位（小 / 中 / 大）：决定格宽、格高、图标边长与名称行。
+    #[serde(default)]
+    pub cell: CellSize,
+    /// 旧版图标尺寸（逻辑 px，v3 及更早）：加载时迁移为 `cell`，不再写回。
+    #[serde(rename = "icon_size", default, skip_serializing_if = "Option::is_none")]
+    pub legacy_icon_size: Option<f32>,
+    /// 侧边栏图标间距（逻辑 px）。
     pub gap: f32,
     /// 布局格式（网格 / 列表）。
     pub layout: FenceLayout,
     /// 背景风格（玻璃 / 透明 / 颜色）。v3 起替代透明度滑块，决定填充与不透明度。
     #[serde(default = "default_bg_style")]
     pub bg_style: FenceStyle,
-    /// 边框描边宽度（逻辑 px；描边模式用中粗线）。
-    pub border_width: f32,
     /// 栅栏背景不透明度（0.0=完全透明，1.0=不透明；滑块调节）。
     ///
     /// v3 起滑块移除，「风格」取代它；字段保留仅供旧配置反序列化兼容，渲染不再读取。
@@ -263,6 +359,9 @@ pub struct FenceAppearance {
     /// 是否显示图标名称标签；关闭后只显示图标。
     #[serde(default = "default_true")]
     pub show_labels: bool,
+    /// 网格容量不足时：折叠成九宫格缩略图 / 换行滚动。
+    #[serde(default)]
+    pub overflow: OverflowMode,
     /// 网格固定列数；0 = 按栅栏宽度自动计算。
     #[serde(default)]
     pub grid_cols: u32,
@@ -305,20 +404,18 @@ impl Default for FenceAppearance {
     fn default() -> Self {
         Self {
             bg_color: [0.08, 0.08, 0.12, 0.55],
-            corner_radius: 12.0,
-            acrylic: true,
-            title_bar_height: 32.0,
             padding: 12.0,
-            icon_size: 48.0,
+            cell: CellSize::Medium,
+            legacy_icon_size: None,
             gap: 10.0,
             layout: FenceLayout::Grid,
             bg_style: FenceStyle::Glass,
-            border_width: 1.75,
             opacity: 0.55,
             tint: None,
             sidebar_pos: SidebarPosition::Left,
             show_title: true,
             show_labels: true,
+            overflow: OverflowMode::Fold,
             grid_cols: 0,
             grid_rows: 0,
             fill_opacity: 0.8,
@@ -639,7 +736,7 @@ fn default_next_todo_id() -> u64 {
 impl Desk {
     pub fn new(settings: crate::config::AppSettings) -> Self {
         Self {
-            version: 3,
+            version: 4,
             settings,
             fences: Vec::new(),
             free_icons: Vec::new(),
@@ -846,7 +943,9 @@ mod tests {
         let old = r#"{"bg_color":[0.08,0.08,0.12,0.55],"corner_radius":12.0,"acrylic":true,"title_bar_height":32.0,"padding":12.0,"icon_size":48.0,"gap":10.0}"#;
         let a: FenceAppearance = serde_json::from_str(old).expect("旧配置应可反序列化");
         assert_eq!(a.bg_style, FenceStyle::Glass);
-        assert_eq!(a.border_width, 1.75);
+        // 旧 icon_size 先进入迁移占位字段，再由 normalize 折算成档位
+        assert_eq!(a.legacy_icon_size, Some(48.0));
+        assert_eq!(a.cell, CellSize::Medium);
         assert_eq!(a.layout, FenceLayout::Grid);
         assert_eq!(a.opacity, 0.55);
         assert_eq!(a.tint, None);

@@ -52,60 +52,54 @@ pub struct Theme {
     pub fence_bg: Color,
     pub fence_border: Color,
     pub fence_corner_radius: f32,
-    pub fence_padding: f32,
+    /// 边框描边宽度（物理像素）：常态 1px 细线，选中时用强调色 2px。
+    pub fence_border_width: f32,
     /// 模糊背景高斯标准偏差（物理像素，`GaussianBlurEffect::SetStandardDeviation`）。
-    /// GPU 效果按 sigma 直接设；初值 20 对旧观感微调。
     pub blur_stddev: f32,
+    // 强调色（单一来源）：选中框、滑轨、按钮激活态共用，避免出现两种蓝。
+    pub accent: [f32; 4],
     // 标题
+    /// 栅栏标题（13 semibold）。
+    pub fence_title: TextStyle,
+    /// 控制中心标题（16）。
     pub title: TextStyle,
-    pub title_padding_bottom: f32,
     // 图标
-    pub icon_size: f32,
-    pub icon_gap: f32,
-    pub icon_caption_gap: f32,
-    pub label: TextStyle,
-    pub caption_max_width: f32,
-    // 网格
-    pub icon_cols: u32,
-    // 列表布局
     pub list_row_gap: f32,
     pub list_label_gap: f32,
+    // 文字
+    pub label: TextStyle,
+    /// 辅助说明 / 列头（11）。
+    pub detail_size: f32,
 }
-
-/// 网格图标下方文件名标签：两行总高 = `label.size` 的倍数（DWrite 每行实际行高约
-/// 1.1 倍字号 + 余量）。App 布局（行高/编辑框）与 Render 绘制（标签框）共用同一
-/// 常量，保证二者一致不重叠。
-pub const GRID_CAPTION_H_MULT: f32 = 2.6;
 
 impl Default for Theme {
     fn default() -> Self {
-        // 现代深色半透明栅栏；具体数值在 M4 视觉打磨阶段调整。
         Self {
             scale: 1.0,
             fence_bg: Color::rgba(0.13, 0.15, 0.19, 0.60),
             fence_border: Color::rgba(1.0, 1.0, 1.0, 0.42),
             fence_corner_radius: 12.0,
-            fence_padding: 14.0,
+            fence_border_width: 1.0,
             blur_stddev: 20.0,
+            accent: [0.23, 0.51, 0.96, 0.92],
+            fence_title: TextStyle {
+                font_family: "Microsoft YaHei UI",
+                size: 13.0,
+                color: Color::rgba(1.0, 1.0, 1.0, 0.92),
+            },
             title: TextStyle {
                 font_family: "Microsoft YaHei UI",
                 size: 16.0,
                 color: Color::rgba(1.0, 1.0, 1.0, 0.90),
             },
-            title_padding_bottom: 10.0,
-            icon_size: 48.0,
-            // 网格格宽保底 = 1.5×图标宽（见 app 层 grid_cell_w），种子栅栏宽度估算对齐
-            icon_gap: 24.0,
-            icon_caption_gap: 6.0,
+            list_row_gap: 8.0,
+            list_label_gap: 10.0,
             label: TextStyle {
                 font_family: "Microsoft YaHei UI",
                 size: 12.0,
                 color: Color::rgba(1.0, 1.0, 1.0, 0.85),
             },
-            caption_max_width: 80.0,
-            icon_cols: 5,
-            list_row_gap: 8.0,
-            list_label_gap: 10.0,
+            detail_size: 11.0,
         }
     }
 }
@@ -117,11 +111,12 @@ mod tests {
     #[test]
     fn default_theme_metrics_are_sane() {
         let t = Theme::default();
-        assert!(t.icon_size > 0.0);
-        assert!(t.icon_cols > 0);
+        assert!(t.fence_border_width > 0.0);
         assert!(t.fence_corner_radius >= 0.0);
-        assert!(t.title.size > 0.0 && t.label.size > 0.0);
-        assert!(t.fence_padding >= 0.0);
+        assert!(t.fence_title.size > 0.0 && t.title.size > 0.0);
+        assert!(t.detail_size >= 10.0);
+        assert!(t.label.size >= t.detail_size);
+        assert!(t.title.size > t.fence_title.size);
     }
 
     #[test]

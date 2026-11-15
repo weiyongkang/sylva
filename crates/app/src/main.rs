@@ -28,6 +28,7 @@ mod scene;
 mod shell_menu;
 mod snapshot;
 mod store;
+mod watchdog;
 
 pub(crate) use std::cell::RefCell;
 pub(crate) use std::collections::HashMap;
@@ -61,8 +62,10 @@ pub(crate) use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP,
 };
 pub(crate) use windows::Win32::UI::Shell::{
-    DragQueryFileW, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog,
-    HDROP, IFileOpenDialog, IShellItem, IShellItemArray, SIGDN_FILESYSPATH,
+    ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE,
+    APPBARDATA, DragQueryFileW, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
+    FileOpenDialog, HDROP, IFileOpenDialog, IShellItem, IShellItemArray, SHAppBarMessage,
+    SIGDN_FILESYSPATH,
 };
 pub(crate) use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HMENU, MF_CHECKED,
@@ -74,17 +77,19 @@ pub(crate) use windows::core::{BOOL, PCWSTR, PWSTR};
 
 pub(crate) use sylva_core::config::AppSettings;
 pub(crate) use sylva_core::drag::DropEffect;
-pub(crate) use sylva_core::magnet::{FENCE_GAP, FreeSides, settle_move, settle_resize};
+pub(crate) use sylva_core::magnet::{
+    FreeSides, SNAP_DIST, alignment_guides, settle_move, settle_resize, snap_move, snap_resize,
+};
 pub(crate) use sylva_core::model::{
     Desk, Fence, FenceAppearance, FenceKind, FenceLayout, FenceState, FenceStyle, HoverEffect,
     Icon, Rect, SidebarPosition, Vec2,
 };
 pub(crate) use sylva_core::storage::DeskStore;
 pub(crate) use sylva_render::{
-    Compositor, ConsoleHit, ConsolePage, ConsoleZone, FenceHit, GRID_CAPTION_H_MULT, GRIP_SIZE,
-    HitModel, IconHit, ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone,
-    Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme,
-    WM_APP_QUIT, WM_SYLVA_INJECT, run_message_loop,
+    Compositor, ConsoleHit, ConsolePage, ConsoleZone, FenceHit, GRIP_SIZE, GuideLine, HitModel,
+    IconHit, ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene,
+    SceneConsole, SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneHud, SceneIcon,
+    Theme, WM_APP_QUIT, WM_SYLVA_INJECT, run_message_loop,
 };
 pub(crate) use sylva_shell::icons::IconData;
 pub(crate) use sylva_shell::items::DesktopItem;
@@ -106,14 +111,21 @@ pub(crate) const MIN_FENCE_W: f32 = 200.0;
 /// 栅栏最小高度（缩放下限，物理像素）。
 pub(crate) const MIN_FENCE_H: f32 = 60.0;
 
-/// 图标提取边长（物理像素）。取高于所有渲染尺寸的值（最大图标 64、列表 20），
-/// 渲染时向下采样才清晰；若按渲染尺寸 32 提取再放大到 48，高 DPI 下发糊。
-pub(crate) const ICON_EXTRACT_SIZE: u32 = 64;
+/// 栅栏之间的最小间距（物理像素）= 全局设置 × DPI。
+fn fence_gap(rt: &Runtime) -> f32 {
+    rt.desk.settings.fence_gap * rt.theme.scale
+}
+
+/// 桌面安全区（物理像素）= 全局设置 × DPI。
+fn desktop_inset(rt: &Runtime) -> f32 {
+    rt.desk.settings.desktop_inset * rt.theme.scale
+}
+
+/// 图标提取边长（物理像素）。取高于所有渲染尺寸的值（最大图标 64、名称关闭时
+/// 80、列表 20），渲染时向下采样才清晰；若按渲染尺寸提取再放大，高 DPI 下发糊。
+pub(crate) const ICON_EXTRACT_SIZE: u32 = 96;
 
 // 右键菜单项 ID（分段避免冲突）。
-
-/// 栅栏边框宽度（DIP）：中粗，按用户要求固定（× scale 变物理像素）。
-pub(crate) const MEDIUM_BORDER_WIDTH: f32 = 2.0;
 
 // ---- 控制中心（桌面组件 + 栅栏管理）布局常量（DIP，× scale 变物理像素）----
 /// 控制台面板默认宽度（用户拖边缘缩放后由 `desk.console_size` 覆盖）。
@@ -135,7 +147,6 @@ pub(crate) const CONSOLE_ADD_BTN_H: f32 = 34.0;
 /// 栅栏管理页：每行高度。
 pub(crate) const CONSOLE_FENCE_ROW_H: f32 = 36.0;
 /// 栅栏管理页：最多同时显示的行数（超出滚动）。
-pub(crate) const CONSOLE_FENCE_MAX_ROWS: usize = 5;
 /// 栅栏管理页：选中栅栏详情区高度。
 pub(crate) const CONSOLE_FENCE_DETAIL_H: f32 = 660.0;
 /// 背景色调预设（标签, RGB 0..1）：菜单项顺序即此处顺序（+1 起）。
@@ -237,6 +248,8 @@ pub(crate) struct Runtime {
     pub(crate) edit_high: Option<u16>,
     /// 控制台面板动画状态（`AnimTick` 推进；idle 时停止定时器保持 0% CPU）。
     pub(crate) console_anim: ConsoleAnim,
+    /// 当前连续动画批次开始时间；超过安全上限强制停止，防止状态机卡死持续重绘。
+    pub(crate) anim_started: Option<Instant>,
     /// 桌面切换时栅栏整体淡出/淡入补间（None = 无动画，按 `desk.desktop_mode` 取最终值）。
     pub(crate) desktop_fade: Option<PanelTween>,
     /// 栅栏管理页当前选中的栅栏下标。
@@ -281,6 +294,17 @@ pub(crate) struct Runtime {
     pub(crate) dragging_icon: Option<(usize, usize)>,
     /// Quick hide：只隐藏本应用视觉，不持久化，重启默认显示。
     pub(crate) quick_hide: bool,
+    /// 拖动/缩放中的对齐参考线（虚拟屏幕坐标；空闲时为空）。
+    pub(crate) guides: Vec<GuideLine>,
+    /// 拖动/缩放中的尺寸徽标（空闲时 None）。
+    pub(crate) hud: Option<SceneHud>,
+    /// 栅栏内拖拽排序预览：(栅栏, 原下标, 插入槽, 光标 x, 光标 y)。
+    pub(crate) grid_reorder: Option<(usize, usize, usize, f32, f32)>,
+    /// 展开溢出格的栅栏下标（点击九宫格缩略图后显示全部图标）。
+    pub(crate) grid_peek: Option<usize>,
+    /// 控制中心左侧栅栏列表的可视矩形与滚动范围（上一帧场景回写，滚轮判定用）。
+    pub(crate) console_list_view: Option<RectF>,
+    pub(crate) fence_scroll_max: f32,
 }
 
 // 事件处理器再入守卫：`handle_event` 打开模态菜单/属性页（`TrackPopupMenu`、Shell 动词
@@ -374,6 +398,8 @@ fn main() {
         }
     }
 
+    // 界面线程卡死看门狗：早于任何窗口/COM 代码启动，卡住时能落盘。
+    watchdog::init(&data_dir);
     let _guard = match logging::init(&data_dir.join("logs")) {
         Ok(g) => g,
         Err(e) => {
@@ -638,6 +664,7 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         edit: None,
         edit_high: None,
         console_anim: ConsoleAnim::new(console_open),
+        anim_started: None,
         desktop_fade: None,
         selected_fence: 0,
         console_page: ConsolePage::System,
@@ -660,6 +687,12 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         drop_hover: None,
         dragging_icon: None,
         quick_hide: false,
+        guides: Vec::new(),
+        hud: None,
+        grid_reorder: None,
+        grid_peek: None,
+        console_list_view: None,
+        fence_scroll_max: 0.0,
     };
     // 原始桌面模式/Quick hide 时不要劫持 Explorer 的桌面右键；栅栏模式才启用。
     unsafe {
@@ -696,10 +729,16 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         .map_err(|e| sylva_core::CoreError::Render(e.to_string()))?;
     let model = hit_model_from(&rt.theme, &scene, &rt.desk);
     memory::report("首帧呈现后");
-    // Shell 右键菜单预热：后台加载栅栏里文件类型的 Shell 扩展（百度网盘等扩展首次
-    // 加载会卡线程数秒），避免「首次右键」在主线程卡死被判无响应。预热在后台线程，
-    // 与用户交互并行，不拖慢启动。
-    {
+    // Shell 右键菜单预热：**默认关闭**（`SYLVA_PRIME_SHELL=1` 可恢复）。
+    //
+    // 预热会把 Shell 上下文菜单扩展（网盘/压缩/云同步等）在本进程里加载并初始化。
+    // 这些扩展不是线程安全的：在后台线程创建 `IContextMenu` 后，其 STA 对象可能与
+    // 主线程的 Shell 调用互相等待，表现为整窗「未响应」（Event Log: AppHangB1,
+    // 退出码 0xCFFFFFFF），UI 线程卡在 Shell/COM 调用里。
+    //
+    // 现在改为按需预热：右键时 `shell_menu::show` 会先 `ensure_primed`，等待期间
+    // 泵送消息（窗口保持响应），代价只是**每个文件类型的第一次右键稍慢**。
+    if std::env::var_os("SYLVA_PRIME_SHELL").is_some() {
         let paths: Vec<String> = rt
             .desk
             .icons
@@ -707,6 +746,11 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
             .filter_map(|ic| ic.path.clone())
             .collect();
         shell_menu::prime_startup(&paths);
+        shell_menu::prime_desktop_startup();
+        tracing::info!(
+            types = paths.len(),
+            "Shell 菜单预热已启用（SYLVA_PRIME_SHELL）"
+        );
     }
     // 启动期一次性分配已就绪：把不再活跃的内存页换出工作集（D3D/场景构建等），
     // 降低常驻内存。GPU 侧资源由驱动管理不受影响，用到时自动换回。
@@ -803,7 +847,8 @@ fn fence_collision_rect(rt: &Runtime, i: usize) -> Rect {
 /// 两个栅栏叠加到同一个自动高度栅栏上就是旧版「栅栏重叠」的根因之一）。
 fn other_bounds(rt: &Runtime, skip: usize) -> Vec<Rect> {
     (0..rt.desk.fences.len())
-        .filter(|&i| i != skip)
+        // 隐藏的栅栏不占位：不可见的东西不该挡住拖动/新建/对齐。
+        .filter(|&i| i != skip && !rt.desk.fences[i].appearance.hidden)
         .map(|i| fence_collision_rect(rt, i))
         .collect()
 }
@@ -819,9 +864,13 @@ fn resolve_overlaps(rt: &mut Runtime) -> bool {
     let mut changed = false;
     let screen = screen_rect(rt);
     for i in 0..rt.desk.fences.len() {
+        // 隐藏的栅栏不参与启动消解：它不占位，也不该被可见栅栏推着跑。
+        if rt.desk.fences[i].appearance.hidden {
+            continue;
+        }
         let others = other_bounds(rt, i);
         let cur = fence_collision_rect(rt, i);
-        let out = settle_move(&cur, &others, &screen, FENCE_GAP);
+        let out = settle_move(&cur, &others, &screen, fence_gap(rt));
         // 只修位置（不改变用户已设的尺寸），并圆整到整数物理像素。
         if (out.x - cur.x).abs() > 0.5 || (out.y - cur.y).abs() > 0.5 {
             rt.desk.fences[i].bounds.x = out.x.round();
@@ -842,6 +891,122 @@ fn screen_rect(rt: &Runtime) -> Rect {
 /// 虚拟/客户端坐标（客户端 (0,0) = 虚拟屏 (0,0) = 屏幕 (ox, oy)）——转虚拟坐标
 /// 需减去 `(ox, oy)`。单屏时 (0,0) 减了无感；多屏主屏非虚拟原点时少了这一步
 /// 侧边栏夹屏会整体错位。失败回退整个虚拟屏幕。
+/// 任务栏占用的屏幕边（仅自动隐藏时需要额外预留）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenEdge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// 任务栏为「自动隐藏」时，它的厚度仍会占用屏幕边缘：`rcWork` 此时等于整屏，
+/// 栅栏贴边就会挡住任务栏弹出（鼠标移到边缘唤不出任务栏）。
+///
+/// 通过 `SHAppBarMessage` 读取任务栏矩形与状态；只有同时满足
+/// 「自动隐藏」且「任务栏与当前显示器相交」才返回预留边与厚度。
+/// 可见任务栏已由 `rcWork` 扣除，这里返回 None，避免重复扣减。
+fn taskbar_reservation(origin: (f32, f32), work: &Rect) -> Option<(ScreenEdge, f32)> {
+    let mut pos = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    if unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut pos) } == 0 {
+        return None;
+    }
+    let mut st = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    let state = unsafe { SHAppBarMessage(ABM_GETSTATE, &mut st) };
+    if state & (ABS_AUTOHIDE as usize) == 0 {
+        return None;
+    }
+    let tb = Rect::new(
+        pos.rc.left as f32 - origin.0,
+        pos.rc.top as f32 - origin.1,
+        (pos.rc.right - pos.rc.left) as f32,
+        (pos.rc.bottom - pos.rc.top) as f32,
+    );
+    // 任务栏不在当前显示器：不预留
+    if tb.right() <= work.x
+        || tb.x >= work.right()
+        || tb.bottom() <= work.y
+        || tb.y >= work.bottom()
+    {
+        return None;
+    }
+    let (edge, thickness) = if pos.uEdge == ABE_BOTTOM {
+        (ScreenEdge::Bottom, tb.h)
+    } else if pos.uEdge == ABE_TOP {
+        (ScreenEdge::Top, tb.h)
+    } else if pos.uEdge == ABE_LEFT {
+        (ScreenEdge::Left, tb.w)
+    } else if pos.uEdge == ABE_RIGHT {
+        (ScreenEdge::Right, tb.w)
+    } else {
+        return None;
+    };
+    (thickness > 1.0).then_some((edge, thickness))
+}
+
+/// 光标所在（或栅栏中心所在）显示器的**工作区**（任务栏扣除后），不含安全区。
+///
+/// 多显示器下按栅栏矩形做 MonitorFromRect，不会像主屏 SPI_GETWORKAREA 那样
+/// 把副屏上的栅栏夹回主屏。失败时退回主屏工作区。
+fn monitor_work_area(rt: &Runtime, rect: &Rect) -> Rect {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+    };
+    let rc = RECT {
+        left: (rect.x + rt.origin.0).round() as i32,
+        top: (rect.y + rt.origin.1).round() as i32,
+        right: (rect.right() + rt.origin.0).round() as i32,
+        bottom: (rect.bottom() + rt.origin.1).round() as i32,
+    };
+    unsafe {
+        let mon = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            let w = mi.rcWork;
+            let mut out = Rect::new(
+                w.left as f32 - rt.origin.0,
+                w.top as f32 - rt.origin.1,
+                (w.right - w.left) as f32,
+                (w.bottom - w.top) as f32,
+            );
+            // 自动隐藏的任务栏不占 rcWork：在它所在的那条边上补预留，
+            // 避免栅栏贴边后挡住任务栏弹出。可见任务栏已由 rcWork 扣除。
+            if let Some((edge, thickness)) = taskbar_reservation(rt.origin, &out) {
+                match edge {
+                    ScreenEdge::Top => {
+                        out.y += thickness;
+                        out.h -= thickness;
+                    }
+                    ScreenEdge::Bottom => out.h -= thickness,
+                    ScreenEdge::Left => {
+                        out.x += thickness;
+                        out.w -= thickness;
+                    }
+                    ScreenEdge::Right => out.w -= thickness,
+                }
+                out.w = out.w.max(1.0);
+                out.h = out.h.max(1.0);
+            }
+            return out;
+        }
+    }
+    work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh)
+}
+
+/// 栅栏可放置区域 = 所在显示器工作区向内收 DESKTOP_INSET（四边留白）。
+fn fence_placement(rt: &Runtime, rect: &Rect) -> Rect {
+    monitor_work_area(rt, rect).inset(desktop_inset(rt))
+}
+
 fn work_area_rect(ox: f32, oy: f32, vw: f32, vh: f32) -> Rect {
     let mut rc = RECT::default();
     let ok = unsafe {
@@ -918,6 +1083,8 @@ fn present_now(rt: &mut Runtime) {
 /// 无侧边栏时鼠标扫过（`CursorMove`）与 4s 心跳（`SyncLibrary` 无变化）
 /// 都不再触发全量重绘。
 fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
+    watchdog::event(watchdog::code(&ev));
+    watchdog::phase(watchdog::ENTER);
     // 空闲修剪门控：除周期性的 `SyncLibrary` 外都算用户活动，刷新时间戳。
     // `SyncLibrary` 每 4s 触发一次，若算活动则永远「不空闲」，修剪永不执行。
     if !matches!(ev, OverlayEvent::SyncLibrary) {
@@ -948,15 +1115,31 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 } else {
                     other_bounds(rt, fence)
                 };
-                let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
                 let cand = Rect::new(x, y, w, h);
-                let mut out = settle_move(&cand, &others, &wa, FENCE_GAP);
-                // 侧边栏 dock 夹在工作区内（任务栏扣除后），下沿不越过任务栏
-                if let Some(f) = rt.desk.fences.get(fence)
-                    && f.appearance.layout == FenceLayout::Sidebar
-                {
+                // 侧边栏贴边停靠（dock 语义），普通栅栏留出桌面安全区。
+                let wa = monitor_work_area(rt, &cand);
+                let is_sidebar = rt
+                    .desk
+                    .fences
+                    .get(fence)
+                    .is_some_and(|f| f.appearance.layout == FenceLayout::Sidebar);
+                let place = if is_sidebar {
+                    wa
+                } else {
+                    fence_placement(rt, &cand)
+                };
+                // 对齐吸附：拖到邻居边/中线附近时轻轻贴上（Alt 临时关闭）。
+                let threshold = if is_alt_down() {
+                    0.0
+                } else {
+                    SNAP_DIST * rt.theme.scale
+                };
+                let snapped = snap_move(&cand, &others, &place, threshold);
+                let mut out = settle_move(&snapped, &others, &place, fence_gap(rt));
+                if is_sidebar && let Some(f) = rt.desk.fences.get(fence) {
                     out = clamp_sidebar_work_rect(out, wa, f.appearance.sidebar_pos);
                 }
+                set_drag_feedback(rt, &out, &others, &place);
                 if let Some(f) = rt.desk.fences.get_mut(fence) {
                     f.bounds.x = out.x;
                     f.bounds.y = out.y;
@@ -973,7 +1156,6 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             } else {
                 other_bounds(rt, fence)
             };
-            let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
             let free = match zone {
                 ResizeZone::Right => FreeSides::Right,
                 ResizeZone::Bottom => FreeSides::Bottom,
@@ -983,14 +1165,23 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 ResizeZone::TopRight => FreeSides::TopRight,
             };
             let cand = Rect::new(nx, ny, nw, nh);
+            let wa = monitor_work_area(rt, &cand);
+            let place = fence_placement(rt, &cand);
+            // 缩放吸附：只吸可动边（锚定边纹丝不动）。
+            let threshold = if is_alt_down() {
+                0.0
+            } else {
+                SNAP_DIST * rt.theme.scale
+            };
+            let snapped = snap_resize(&cand, &others, &place, free, threshold);
             let mut out = settle_resize(
-                &cand,
+                &snapped,
                 &others,
-                &wa,
+                &place,
                 free,
                 MIN_FENCE_W,
                 MIN_FENCE_H,
-                FENCE_GAP,
+                fence_gap(rt),
             );
             // 侧边栏 dock：厚度轴锁定为「紧贴放大图标」的停靠值——纵向锁 x/w、
             // 横向锁 y/h，只保留用户拖动的那一轴，宽度/高度弹回锁定值，放大图标不再被裁。
@@ -1004,12 +1195,9 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                     Rect::new(d.x, out.y, d.w, out.h)
                 };
                 // 夹在工作区内（任务栏扣除后）：纵向 dock 下沿不越过任务栏
-                out = clamp_sidebar_work_rect(
-                    out,
-                    work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh),
-                    f.appearance.sidebar_pos,
-                );
+                out = clamp_sidebar_work_rect(out, wa, f.appearance.sidebar_pos);
             }
+            set_drag_feedback(rt, &out, &others, &place);
             if let Some(f) = rt.desk.fences.get_mut(fence) {
                 f.bounds = out;
             }
@@ -1252,7 +1440,11 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             }
         }
         OverlayEvent::ContextMenu { fence, icon, pos } => {
+            // 右键菜单是模态的：菜单开着时 UI 线程本就停在 TrackPopupMenu 里，
+            // 标记为 MODAL 让看门狗跳过告警（菜单一旦返回会立刻恢复阶段）。
+            watchdog::phase(watchdog::MODAL);
             handle_context_menu(rt, fence, icon, pos);
+            watchdog::phase(watchdog::HANDLE);
         }
         OverlayEvent::FilesDropped {
             fence,
@@ -1301,8 +1493,8 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 let step = match f.appearance.layout {
                     FenceLayout::List => LIST_ICON_SIZE * s + rt.theme.list_row_gap,
                     // 侧边栏实际步距 = icon + (gap + icon/2)，与 sidebar_eff_gap 一致。
-                    FenceLayout::Sidebar => (f.appearance.icon_size * 1.5 + f.appearance.gap) * s,
-                    FenceLayout::Grid => (f.appearance.icon_size + f.appearance.gap) * s,
+                    FenceLayout::Sidebar => (f.appearance.cell.icon() * 1.5 + f.appearance.gap) * s,
+                    FenceLayout::Grid => f.appearance.cell.cell_h() * s,
                 };
                 f.scroll = (f.scroll - (delta as f32 / 120.0) * step).max(0.0);
             }
@@ -1311,10 +1503,103 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             }
         }
         OverlayEvent::FenceDragEnd { .. } => {
-            // 拖动结束：持久化当前布局
+            // 拖动结束：清掉临时视觉（参考线/尺寸徽标/排序预览），再持久化布局
+            rt.guides.clear();
+            rt.hud = None;
+            rt.grid_reorder = None;
             if let Err(e) = rt.store.save(&rt.desk) {
                 tracing::warn!("布局持久化失败: {e}");
             }
+        }
+        OverlayEvent::OverflowClicked { fence } => {
+            // 溢出格：点一下展开（忽略容量显示全部+滚动），再点收起。
+            rt.grid_peek = if rt.grid_peek == Some(fence) {
+                None
+            } else {
+                Some(fence)
+            };
+        }
+        OverlayEvent::GridReorderDrag {
+            fence,
+            icon,
+            mx,
+            my,
+        } => {
+            let insert = rt
+                .desk
+                .fences
+                .get(fence)
+                .map(|f| slot_index_at(&rt.theme, f, mx, my))
+                .unwrap_or(icon);
+            // 只读镜像（收件箱/门户）顺序由目录决定，不显示排序预览。
+            if rt
+                .desk
+                .fences
+                .get(fence)
+                .is_some_and(|f| !f.kind.is_read_only())
+            {
+                rt.grid_reorder = Some((fence, icon, insert, mx, my));
+            }
+        }
+        OverlayEvent::GridReorderEnd {
+            fence,
+            icon,
+            mx,
+            my,
+        } => {
+            let insert = rt
+                .desk
+                .fences
+                .get(fence)
+                .map(|f| slot_index_at(&rt.theme, f, mx, my))
+                .unwrap_or(icon);
+            rt.grid_reorder = None;
+            // 只读镜像（桌面收件箱 / 文件夹门户）的顺序由目录决定，拒绝重排。
+            let read_only = rt
+                .desk
+                .fences
+                .get(fence)
+                .map(|f| f.kind.is_read_only())
+                .unwrap_or(true);
+            if !read_only && insert != icon {
+                let before = rt.desk.clone();
+                if let Some(f) = rt.desk.fences.get_mut(fence)
+                    && icon < f.icon_ids.len()
+                {
+                    let id = f.icon_ids.remove(icon);
+                    let adj =
+                        (if insert > icon { insert - 1 } else { insert }).min(f.icon_ids.len());
+                    f.icon_ids.insert(adj, id);
+                }
+                commit_or_rollback(rt, before, "栅栏内排序");
+            }
+        }
+        OverlayEvent::FenceClicked { fence } => {
+            // 单击栅栏标题：选中它；控制中心开着就切到该栅栏的设置页（联动）。
+            rt.grid_peek = None;
+            rt.selected_fence = fence.min(rt.desk.fences.len().saturating_sub(1));
+            rt.console_page = ConsolePage::Fence;
+            if rt.desk.console_open {
+                // 列表自动滚动到选中项（行高 36，可视行数由面板高度决定）
+                let s = rt.theme.scale;
+                rt.fence_scroll = clamp_fence_list_scroll(rt, rt.selected_fence, s);
+            }
+        }
+        OverlayEvent::FenceDoubleClicked { fence } => {
+            // 双击标题：折叠 / 展开（折叠后高度 = 上下 padding + 一格标题带）。
+            let before = rt.desk.clone();
+            if let Some(f) = rt.desk.fences.get_mut(fence) {
+                let was_expanded = f.state == FenceState::Expanded;
+                f.state = if was_expanded {
+                    FenceState::Folded
+                } else {
+                    FenceState::Expanded
+                };
+                f.scroll = 0.0;
+            }
+            // 折叠时保留用户原来的高度（bounds.h 不动），展开后尺寸原样恢复：
+            // 折叠态的视觉高度由 layout 按"一格标题带"覆盖，不写回 bounds。
+            commit_or_rollback(rt, before, "折叠/展开栅栏");
         }
         OverlayEvent::ConsoleClick { zone } => match zone {
             ConsoleZone::Close => {
@@ -1351,6 +1636,24 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             ConsoleZone::ToggleFenceOverlap => {
                 rt.desk.settings.allow_fence_overlap = !rt.desk.settings.allow_fence_overlap;
                 let _ = rt.store.save(&rt.desk);
+            }
+            ConsoleZone::SettingGap(dir) => {
+                let v = rt.desk.settings.fence_gap;
+                let nv = (v + dir as f32 * 4.0).clamp(4.0, 48.0);
+                if (nv - v).abs() > 0.01 {
+                    rt.desk.settings.fence_gap = nv;
+                    let _ = rt.store.save(&rt.desk);
+                }
+            }
+            ConsoleZone::SettingInset(dir) => {
+                let v = rt.desk.settings.desktop_inset;
+                let nv = (v + dir as f32 * 4.0).clamp(0.0, 48.0);
+                if (nv - v).abs() > 0.01 {
+                    rt.desk.settings.desktop_inset = nv;
+                    // 安全区变了：重新夹一遍现有栅栏位置（可能往里收），再统一保存。
+                    reanchor_fences(rt);
+                    let _ = rt.store.save(&rt.desk);
+                }
             }
             ConsoleZone::ResetConsoleSize => {
                 rt.desk.console_size = None;
@@ -1399,12 +1702,50 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 }
                 let _ = rt.store.save(&rt.desk);
             }
-            ConsoleZone::FenceIconSize(sz) => {
+            ConsoleZone::FenceCellSize(size) => {
                 let i = rt
                     .selected_fence
                     .min(rt.desk.fences.len().saturating_sub(1));
-                if let Some(f) = rt.desk.fences.get_mut(i) {
-                    f.appearance.icon_size = sz;
+                let s = rt.theme.scale;
+                let vw = rt.vw;
+                // 自动列数时：按旧格宽算当前列数，切档后按新格宽回推宽度，
+                // 保持"列数不变"——否则切到大档会突然少一列、内容溢出。
+                let prev = rt.desk.fences.get(i).map(|f| {
+                    (
+                        f.appearance.cell,
+                        f.appearance.layout,
+                        f.appearance.grid_cols,
+                        f.bounds.w,
+                        f.appearance.padding,
+                    )
+                });
+                if let Some((old_cell, layout, cols, w, pad)) = prev
+                    && let Some(f) = rt.desk.fences.get_mut(i)
+                {
+                    f.appearance.cell = size;
+                    if layout == FenceLayout::Grid && cols == 0 && w > 0.0 {
+                        let old_w =
+                            sylva_core::layout::cell_metrics(old_cell, f.appearance.show_labels, s)
+                                .cell_w;
+                        let new_w =
+                            sylva_core::layout::cell_metrics(size, f.appearance.show_labels, s)
+                                .cell_w;
+                        let n = (((w - 2.0 * pad * s) / old_w).floor() as usize).max(1);
+                        f.bounds.w = (n as f32 * new_w + 2.0 * pad * s)
+                            .min(vw.max(MIN_FENCE_W * s))
+                            .round();
+                    }
+                }
+                // 档位变了，宽高再按固定行列约束重算一遍。
+                resize_fence_to_grid(rt, i);
+                // 侧边栏 Dock 的厚度由图标尺寸派生，切档后重新停靠一次。
+                if rt
+                    .desk
+                    .fences
+                    .get(i)
+                    .is_some_and(|f| f.appearance.layout == FenceLayout::Sidebar)
+                {
+                    let _ = reanchor_fences(rt);
                 }
                 let _ = rt.store.save(&rt.desk);
             }
@@ -1434,6 +1775,17 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                     f.appearance.show_title = show;
                 }
                 resize_fence_to_grid(rt, i);
+                let _ = rt.store.save(&rt.desk);
+            }
+            ConsoleZone::FenceOverflow(mode) => {
+                let i = rt
+                    .selected_fence
+                    .min(rt.desk.fences.len().saturating_sub(1));
+                if let Some(f) = rt.desk.fences.get_mut(i) {
+                    f.appearance.overflow = mode;
+                }
+                // 切换后不再是展开态（换行模式没有溢出格）
+                rt.grid_peek = None;
                 let _ = rt.store.save(&rt.desk);
             }
             ConsoleZone::FenceShowLabels(show) => {
@@ -1568,7 +1920,7 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                                 .map(|j| fence_collision_rect(rt, j))
                                 .collect::<Vec<_>>();
                             let screen = screen_rect(rt);
-                            let out = settle_move(&start, &others, &screen, FENCE_GAP);
+                            let out = settle_move(&start, &others, &screen, fence_gap(rt));
                             let bounds =
                                 Rect::new(out.x.round(), out.y.round(), w.round(), h.round());
                             rt.desk.fences.push(Fence {
@@ -1674,17 +2026,20 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
         OverlayEvent::ConsoleControlDragEnd => {
             let _ = rt.store.save(&rt.desk);
         }
-        OverlayEvent::ConsoleScroll { delta } => {
-            // 栅栏页右侧设置可纵向滚动；系统页/栅栏列表仍用左侧滚动。
+        OverlayEvent::ConsoleScroll { delta, pos } => {
+            // 光标在左侧栅栏列表上 → 滚列表；否则栅栏页滚右侧设置页。
             let s = rt.theme.scale;
-            let step = 30.0 * s;
-            if rt.console_page == ConsolePage::Fence {
+            let in_list = rt.console_list_view.is_some_and(|r| {
+                pos.0 >= r.x && pos.0 <= r.x + r.w && pos.1 >= r.y && pos.1 <= r.y + r.h
+            });
+            if in_list || rt.console_page != ConsolePage::Fence {
+                let step = CONSOLE_FENCE_ROW_H * s;
+                let max = rt.fence_scroll_max;
+                rt.fence_scroll = (rt.fence_scroll - (delta as f32 / 120.0) * step).clamp(0.0, max);
+            } else {
+                let step = 30.0 * s;
                 rt.detail_scroll = (rt.detail_scroll - (delta as f32 / 120.0) * step)
                     .clamp(0.0, rt.detail_scroll_max);
-            } else {
-                let step = CONSOLE_FENCE_ROW_H * s;
-                let max = fence_scroll_max(rt);
-                rt.fence_scroll = (rt.fence_scroll - (delta as f32 / 120.0) * step).clamp(0.0, max);
             }
         }
         OverlayEvent::ConsoleHover { zone } => {
@@ -1695,6 +2050,14 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
             // Ctrl+Z 撤销删除（编辑框内交给编辑逻辑处理，避免抢文本撤销）。
             if ctrl && vk == b'Z' as u32 && rt.edit.is_none() {
                 undo_last(rt);
+            } else if vk == VK_ESCAPE.0 as u32 && rt.edit.is_none() && rt.grid_peek.is_some() {
+                // Esc 优先收起溢出的九宫格展开态
+                rt.grid_peek = None;
+            } else if vk == VK_ESCAPE.0 as u32 && rt.edit.is_none() && rt.desk.console_open {
+                // Esc 关闭控制中心（避免展开后"困在里面"）
+                rt.desk.console_open = false;
+                start_panel_tween(rt, 0.0);
+                let _ = rt.store.save(&rt.desk);
             } else {
                 edit_key(rt, vk, ctrl);
             }
@@ -1806,14 +2169,38 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
         }
         OverlayEvent::AnimTick => {
             // 动画帧：推进面板/行补间；全部结束后停用定时器，回到空闲 0% CPU。
-            if !advance_anim(rt) {
+            // 加安全上限：任何状态机异常都不得让 16ms 定时器永久运行（否则持续
+            // 全量重绘、日志暴涨，Windows 会以应用无响应终止进程）。
+            if rt.anim_started.is_none() {
+                rt.anim_started = Some(Instant::now());
+            }
+            let still = advance_anim(rt);
+            let elapsed = rt
+                .anim_started
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
+            if still && elapsed > 2.0 {
+                tracing::warn!(elapsed, "动画运行超过 2s，强制停止以避免无响应");
+                rt.icon_hover = None;
+                rt.desktop_fade = None;
+                rt.fence_tweens.clear();
+                if let Some(pt) = rt.console_anim.panel_tween.take() {
+                    rt.console_anim.panel = pt.to;
+                }
                 unsafe { (*rt.overlay_ptr).set_anim_active(false) };
+                rt.anim_started = None;
+            } else if !still {
+                unsafe { (*rt.overlay_ptr).set_anim_active(false) };
+                rt.anim_started = None;
             }
         }
         OverlayEvent::SyncLibrary => {
             // 双向同步：内部库被外部删除 → 栅栏项移除；链接文件夹增删改名 → 栅栏镜像
             // （文件夹是事实来源，栅栏即文件夹；有变化才持久化）
+            // 阶段埋点：这一步会枚举目录 / stat 引用路径，若卡住看门狗会记录下来。
+            watchdog::phase(watchdog::SYNC);
             let changed = reconcile_fences(rt);
+            watchdog::phase(watchdog::HANDLE);
             if changed {
                 let _ = rt.store.save(&rt.desk);
             }
@@ -1825,7 +2212,9 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 && rt.last_trim.elapsed() >= TRIM_MIN_INTERVAL
             {
                 rt.last_trim = std::time::Instant::now();
+                watchdog::phase(watchdog::TRIM);
                 memory::trim();
+                watchdog::phase(watchdog::HANDLE);
             }
             // 无变化不重绘（消除 4s 心跳脉冲）
             redraw = changed;
@@ -1843,6 +2232,9 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                 let mut t = Theme::default();
                 apply_theme_scale(&mut t, scale);
                 rt.theme = t;
+                if let Err(e) = rt.compositor.set_theme(&rt.theme) {
+                    tracing::warn!("DPI 变化后重建文本格式失败: {e}");
+                }
                 if reanchor_fences(rt) {
                     let _ = rt.store.save(&rt.desk);
                 }
@@ -1873,6 +2265,9 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
                     let mut t = Theme::default();
                     apply_theme_scale(&mut t, scale);
                     rt.theme = t;
+                    if let Err(e) = rt.compositor.set_theme(&rt.theme) {
+                        tracing::warn!("显示尺寸变化后重建文本格式失败: {e}");
+                    }
                     tracing::info!(dpi, scale, "显示尺寸变化：主题已按新屏幕重新缩放");
                 }
                 if reanchor_fences(rt) {
@@ -1915,20 +2310,26 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
     // 重绘门控落点：无可见变化的事件直接返回 None（overlay 保持当前命中模型
     // 与区域），省掉一次 build_scene + D2D 全量绘制 + commit。
     if !redraw {
+        watchdog::idle();
         return None;
     }
 
     // 重新排布 + 重绘 + 生成新命中模型（含区域）。
     // 高度策略：`bounds.h == 0` 表示未手动缩放，每帧按内容自适应（增删应用自动长高）；
     // 用户拖角标缩放后 `bounds.h` 变为具体值，高度固定，放不下的图标以 "+N" 提示。
+    watchdog::phase(watchdog::SCENE);
     let scene = build_scene(rt, Instant::now());
     let ups = std::mem::take(&mut rt.pending_uploads);
     let upload_refs: Vec<(u64, &IconData)> = ups.iter().map(|(id, d)| (*id, d)).collect();
+    watchdog::phase(watchdog::PRESENT);
+    watchdog::frame();
     if let Err(e) = rt.compositor.present(&scene, &upload_refs) {
         tracing::warn!("重绘失败: {e}");
     }
+    watchdog::phase(watchdog::HIT);
     let model = hit_model_from(&rt.theme, &scene, &rt.desk);
     sync_drop_target(rt, &model);
+    watchdog::idle();
     Some(model)
 }
 
@@ -1991,16 +2392,49 @@ fn theme_scale_for(dpi: u32, vw: u32, vh: u32) -> f32 {
 fn apply_theme_scale(theme: &mut Theme, scale: f32) {
     theme.scale = scale;
     theme.title.size *= scale;
+    theme.fence_title.size *= scale;
     theme.label.size *= scale;
-    theme.icon_size *= scale;
-    theme.icon_gap *= scale;
-    theme.icon_caption_gap *= scale;
-    theme.fence_padding *= scale;
+    theme.detail_size *= scale;
+    theme.fence_border_width *= scale;
     theme.fence_corner_radius *= scale;
-    theme.title_padding_bottom *= scale;
-    theme.caption_max_width *= scale;
     theme.list_row_gap *= scale;
     theme.list_label_gap *= scale;
+}
+
+/// 光标是否按住 Alt（拖动时临时关闭对齐吸附）。
+fn is_alt_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_MENU};
+    unsafe { GetKeyState(VK_MENU.0 as i32) < 0 }
+}
+
+/// 拖动/缩放反馈：对齐参考线 + 尺寸徽标（松手时由 FenceDragEnd 清空）。
+fn set_drag_feedback(rt: &mut Runtime, rect: &Rect, others: &[Rect], place: &Rect) {
+    rt.guides = alignment_guides(rect, others, place, 0.75)
+        .into_iter()
+        .map(|g| GuideLine {
+            vertical: g.vertical,
+            pos: g.pos,
+            from: g.from,
+            to: g.to,
+        })
+        .collect();
+    let s = rt.theme.scale.max(0.01);
+    let text = format!(
+        "{:.0} × {:.0}",
+        (rect.w / s).round().max(0.0),
+        (rect.h / s).round().max(0.0)
+    );
+    // 徽标贴在栅栏右下角**内侧**：拖动时不会跑到合成表面之外，也不遮挡图标区。
+    let font = rt.theme.label.size;
+    let w = sylva_core::text::estimate_width(&text, font) + 16.0 * s;
+    let h = font * 1.6 + 8.0 * s;
+    rt.hud = Some(SceneHud {
+        text,
+        x: (rect.right() - w - 10.0 * s).max(rect.x + 6.0 * s),
+        y: (rect.bottom() - h - 10.0 * s).max(rect.y + 6.0 * s),
+        w,
+        h,
+    });
 }
 
 /// 栅栏当前实际高度（物理像素）：`bounds.h > 0` 为固定高度；否则（自动高度）用
@@ -2008,16 +2442,21 @@ fn apply_theme_scale(theme: &mut Theme, scale: f32) {
 /// `bounds.h == 0`，直接当 0 高会把碰撞检测和夹屏一起带偏。
 fn fence_height(rt: &Runtime, i: usize) -> f32 {
     match rt.desk.fences.get(i) {
+        // 折叠态：视觉高度恒为「一格标题带」，与 bounds.h 无关
+        Some(Fence {
+            state: FenceState::Folded,
+            ..
+        }) => rt.last_layout_h.get(i).copied().unwrap_or(0.0),
         Some(f) if f.bounds.h > 0.0 => f.bounds.h,
         _ => rt.last_layout_h.get(i).copied().unwrap_or(0.0),
     }
 }
 
-/// 把矩形左上角夹回虚拟屏内（宽高不变；矩形宽高本身超出屏幕时贴左/上边缘）。
-fn clamp_into_screen(x: f32, y: f32, w: f32, h: f32, vw: f32, vh: f32) -> (f32, f32) {
+/// 把矩形左上角夹进给定区域内（宽高不变；区域比矩形小时贴左/上边缘）。
+fn clamp_into_rect(x: f32, y: f32, w: f32, h: f32, area: &Rect) -> (f32, f32) {
     (
-        x.clamp(0.0, (vw - w).max(0.0)),
-        y.clamp(0.0, (vh - h).max(0.0)),
+        x.clamp(area.x, (area.right() - w).max(area.x)),
+        y.clamp(area.y, (area.bottom() - h).max(area.y)),
     )
 }
 
@@ -2030,8 +2469,10 @@ fn clamp_into_screen(x: f32, y: f32, w: f32, h: f32, vw: f32, vh: f32) -> (f32, 
 fn reanchor_fences(rt: &mut Runtime) -> bool {
     let mut changed = false;
     for i in 0..rt.desk.fences.len() {
+        let bounds = rt.desk.fences[i].bounds;
         if rt.desk.fences[i].appearance.layout == FenceLayout::Sidebar {
-            let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
+            // 侧边栏按所在显示器工作区重钉（多屏时不再被夹回主屏）
+            let wa = monitor_work_area(rt, &bounds);
             let b = sidebar_dock_rect(rt.theme.scale, &rt.desk.fences[i], &wa);
             let b = clamp_sidebar_work_rect(b, wa, rt.desk.fences[i].appearance.sidebar_pos);
             if rt.desk.fences[i].bounds != b {
@@ -2039,19 +2480,26 @@ fn reanchor_fences(rt: &mut Runtime) -> bool {
                 changed = true;
             }
         } else {
-            let (nx, ny) = clamp_into_screen(
-                rt.desk.fences[i].bounds.x,
-                rt.desk.fences[i].bounds.y,
-                rt.desk.fences[i].bounds.w,
-                fence_height(rt, i),
-                rt.vw,
-                rt.vh,
-            );
+            // 普通栅栏：夹回所在显示器的"工作区 − 安全区"，与拖动时同一套边界
+            let place = fence_placement(rt, &bounds);
+            let (nx, ny) =
+                clamp_into_rect(bounds.x, bounds.y, bounds.w, fence_height(rt, i), &place);
             if nx != rt.desk.fences[i].bounds.x || ny != rt.desk.fences[i].bounds.y {
                 rt.desk.fences[i].bounds.x = nx;
                 rt.desk.fences[i].bounds.y = ny;
                 changed = true;
             }
+        }
+    }
+    // 夹屏之后再清"行数派生"的旧高度（顺序很重要：先按旧高度夹住位置，
+    // 再交给布局收缩，否则高度先归零会让夹屏按 0 高计算，可能把栅栏放到屏幕外）。
+    for f in &mut rt.desk.fences {
+        if f.appearance.layout == FenceLayout::Grid
+            && f.appearance.grid_rows > 0
+            && f.bounds.h != 0.0
+        {
+            f.bounds.h = 0.0;
+            changed = true;
         }
     }
     changed
@@ -2256,14 +2704,21 @@ fn delete_selected(rt: &mut Runtime) {
     commit_or_rollback(rt, before, "删除选中项");
 }
 
-/// 开始就地重命名（D2D 内联编辑，Explorer 风格）：Enter/失焦提交，Esc 取消。
-/// 编辑框与栅栏/标签同表面渲染，无黑边、无层级问题，IME 中文直接可用。
-fn fence_scroll_max(rt: &Runtime) -> f32 {
-    let n = rt.desk.fences.len();
-    if n <= CONSOLE_FENCE_MAX_ROWS {
-        return 0.0;
+/// 让控制中心左侧栅栏列表滚到能看见第 `idx` 行（选中联动时用）。
+fn clamp_fence_list_scroll(rt: &Runtime, idx: usize, scale: f32) -> f32 {
+    let row_h = CONSOLE_FENCE_ROW_H * scale;
+    // 可视行数由面板高度决定（见 build_console），直接用场景回写的滚动上限。
+    let max_scroll = rt.fence_scroll_max;
+    let view_rows = ((rt.console_list_view.map(|r| r.h).unwrap_or(row_h * 5.0)) / row_h).max(1.0);
+    let mut scroll = rt.fence_scroll.clamp(0.0, max_scroll);
+    let top = idx as f32 * row_h;
+    let bottom = top + row_h;
+    if top < scroll {
+        scroll = top;
+    } else if bottom > scroll + view_rows * row_h {
+        scroll = (bottom - view_rows * row_h).min(max_scroll);
     }
-    (n - CONSOLE_FENCE_MAX_ROWS) as f32 * CONSOLE_FENCE_ROW_H * rt.theme.scale
+    scroll.max(0.0)
 }
 
 /// 新栅栏的默认矩形：按当前屏幕做一次碰撞避让，避免叠在已有栅栏上。
@@ -2272,10 +2727,10 @@ fn default_fence_bounds(rt: &Runtime) -> Rect {
     let w = 360.0 * s;
     let h = 220.0 * s;
     let start = Rect::new(80.0 * s, 120.0 * s, w, h);
-    let others = (0..rt.desk.fences.len())
-        .map(|j| fence_collision_rect(rt, j))
-        .collect::<Vec<_>>();
-    let out = settle_move(&start, &others, &screen_rect(rt), FENCE_GAP);
+    let others = other_bounds(rt, usize::MAX);
+    // 落点限制在"桌面安全区"内：新栅栏不会贴边，也不会压住任务栏。
+    let place = fence_placement(rt, &start);
+    let out = settle_move(&start, &others, &place, fence_gap(rt));
     Rect::new(out.x.round(), out.y.round(), w.round(), h.round())
 }
 
@@ -2325,6 +2780,7 @@ fn step_grid_value(value: u32, delta: i32) -> u32 {
 /// 用户调整固定列/行时同步改变栅栏实际宽高，而不是只改内部排布。
 fn resize_fence_to_grid(rt: &mut Runtime, i: usize) {
     let s = rt.theme.scale;
+    let vw = rt.vw;
     let Some(f) = rt.desk.fences.get_mut(i) else {
         return;
     };
@@ -2333,33 +2789,18 @@ fn resize_fence_to_grid(rt: &mut Runtime, i: usize) {
     }
     let app = &f.appearance;
     let pad = app.padding * s;
-    let icon = app.icon_size * s;
-    let gap = app.gap * s;
-    let cell_w = grid_cell_w(icon, gap);
-    let row_h = if app.show_labels {
-        grid_row_h(&rt.theme, icon)
-    } else {
-        icon + gap
-    };
-    let title_h = if app.show_title {
-        rt.theme.title.size * 1.6 + rt.theme.title_padding_bottom
-    } else {
-        0.0
-    };
+    // 格宽/格高来自档位（与布局、绘制同源），不再用图标 + gap 现推。
+    let cell = sylva_core::layout::cell_metrics(app.cell, app.show_labels, s);
     if app.grid_cols > 0 {
-        let w = (pad * 2.0 + app.grid_cols as f32 * cell_w)
+        let w = (pad * 2.0 + app.grid_cols as f32 * cell.cell_w)
             .max(MIN_FENCE_W * s)
-            .min((rt.vw - f.bounds.x).max(MIN_FENCE_W * s));
+            .min((vw - f.bounds.x).max(MIN_FENCE_W * s));
         f.bounds.w = w.round();
     }
-    if app.grid_rows > 0 {
-        let header_extra = if app.show_title { title_h + pad } else { 0.0 };
-        let h = (pad + header_extra + app.grid_rows as f32 * row_h + pad).max(MIN_FENCE_H * s);
-        f.bounds.h = h.round();
-    } else {
-        // 0 = 自动高度：清掉手动高度，让 layout_fence 按全部行自适应。
-        f.bounds.h = 0.0;
-    }
+    // 高度一律交给布局派生：行数由 grid_rows 表达（0 = 全部行），
+    // bounds.h 只表示"用户手动拉伸过"。这里清掉，避免旧指标写死的值
+    // 在标题带/格高变化后留下一条空白。
+    f.bounds.h = 0.0;
 }
 
 /// Windows 原生颜色选择器；返回 RGB 0..1。取消返回 None。

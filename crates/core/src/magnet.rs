@@ -285,14 +285,23 @@ fn apply_min(r: &mut Rect, free: FreeSides, min_w: f32, min_h: f32) {
     }
 }
 
-fn clamp_resize(r: &mut Rect, screen: &Rect, free: FreeSides) {
+/// 把可动边夹进屏幕：宽度/高度**不小于最小尺寸**。
+///
+/// 旧实现把上限算成 `screen.right() - r.x`，当栅栏本身已在屏幕边外（显示拓扑
+/// 变化、旧数据越界）时该值为负 → 宽高被压成 0，拖一下就"缩成一条线"。
+fn clamp_resize(r: &mut Rect, screen: &Rect, free: FreeSides, min_w: f32, min_h: f32) {
     if free.left_free() {
         r.x = r.x.max(screen.x);
     }
     if free.right_free() {
         let m = screen.right() - r.x;
-        if r.w > m {
-            r.w = m.max(0.0);
+        if m <= 0.0 {
+            // 栅栏整体已在屏幕右缘之外（旧数据/显示变化）：把它拉回屏幕内，
+            // 而不是把宽度钳成 0（用户看到的"缩成一条线"）。
+            r.w = r.w.max(min_w);
+            r.x = (screen.right() - r.w).max(screen.x);
+        } else if r.w > m {
+            r.w = m;
         }
     }
     if free.top_free() {
@@ -300,8 +309,11 @@ fn clamp_resize(r: &mut Rect, screen: &Rect, free: FreeSides) {
     }
     if free.bottom_free() {
         let m = screen.bottom() - r.y;
-        if r.h > m {
-            r.h = m.max(0.0);
+        if m <= 0.0 {
+            r.h = r.h.max(min_h);
+            r.y = (screen.bottom() - r.h).max(screen.y);
+        } else if r.h > m {
+            r.h = m;
         }
     }
 }
@@ -330,12 +342,165 @@ pub fn settle_resize(
     let mut r = *bounds;
     resolve_gap_resize(&mut r, others, gap, free);
     apply_min(&mut r, free, min_w, min_h);
-    clamp_resize(&mut r, screen, free);
+    clamp_resize(&mut r, screen, free, min_w, min_h);
     // 取最小尺寸 / 夹屏可能让可动边重新贴近或越过其它栅栏 → 再约束一次可动边
     //（间距/不重叠为硬约束，窄空间里最小尺寸让位于间距）。
     resolve_gap_resize(&mut r, others, gap, free);
-    clamp_resize(&mut r, screen, free);
+    clamp_resize(&mut r, screen, free, min_w, min_h);
     r
+}
+
+/// 对齐参考线（用于拖动/缩放时绘制）：一条线 + 它覆盖的区间。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AlignGuide {
+    /// true = 竖线（对齐 x），false = 横线（对齐 y）。
+    pub vertical: bool,
+    /// 线位置（x 或 y）。
+    pub pos: f32,
+    /// 线的起止（另一轴区间）。
+    pub from: f32,
+    pub to: f32,
+}
+
+/// 吸附阈值（逻辑 px）：离对齐线这么近就贴上去，按住 Alt 可临时关闭。
+pub const SNAP_DIST: f32 = 6.0;
+
+/// 参与对齐的目标线：屏幕/工作区四条边 + 中线，以及每个邻居的三条边 + 中线。
+fn align_targets(others: &[Rect], bounds: &Rect) -> (Vec<f32>, Vec<f32>) {
+    let mut xs = vec![bounds.x, bounds.x + bounds.w / 2.0, bounds.right()];
+    let mut ys = vec![bounds.y, bounds.y + bounds.h / 2.0, bounds.bottom()];
+    for o in others {
+        xs.extend([o.x, o.x + o.w / 2.0, o.right()]);
+        ys.extend([o.y, o.y + o.h / 2.0, o.bottom()]);
+    }
+    (xs, ys)
+}
+
+/// 在一组候选值里找最近的吸附位移（|Δ| < threshold），找不到返回 0。
+fn snap_delta(values: &[f32], targets: &[f32], threshold: f32) -> f32 {
+    let mut best = 0.0f32;
+    let mut best_abs = threshold;
+    for v in values {
+        for t in targets {
+            let d = t - v;
+            if d.abs() < best_abs {
+                best_abs = d.abs();
+                best = d;
+            }
+        }
+    }
+    best
+}
+
+/// 移动吸附：整体平移，左/右/中线任一与目标对齐即吸附。
+pub fn snap_move(rect: &Rect, others: &[Rect], bounds: &Rect, threshold: f32) -> Rect {
+    if threshold <= 0.0 {
+        return *rect;
+    }
+    let (tx, ty) = align_targets(others, bounds);
+    let dx = snap_delta(
+        &[rect.x, rect.x + rect.w / 2.0, rect.right()],
+        &tx,
+        threshold,
+    );
+    let dy = snap_delta(
+        &[rect.y, rect.y + rect.h / 2.0, rect.bottom()],
+        &ty,
+        threshold,
+    );
+    Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h)
+}
+
+/// 缩放吸附：只吸附可动边（与 `settle_resize` 的 `FreeSides` 同义），不动锚定边。
+pub fn snap_resize(
+    rect: &Rect,
+    others: &[Rect],
+    bounds: &Rect,
+    free: FreeSides,
+    threshold: f32,
+) -> Rect {
+    if threshold <= 0.0 {
+        return *rect;
+    }
+    let (tx, ty) = align_targets(others, bounds);
+    let mut out = *rect;
+    if free.left_free() && !free.right_free() {
+        let d = snap_delta(&[out.x], &tx, threshold);
+        out.x += d;
+        out.w -= d;
+    } else if free.right_free() && !free.left_free() {
+        out.w += snap_delta(&[out.right()], &tx, threshold);
+    }
+    if free.top_free() && !free.bottom_free() {
+        let d = snap_delta(&[out.y], &ty, threshold);
+        out.y += d;
+        out.h -= d;
+    } else if free.bottom_free() && !free.top_free() {
+        out.h += snap_delta(&[out.bottom()], &ty, threshold);
+    }
+    out
+}
+
+/// 最终矩形已确定后，按"精确对齐"（误差 ≤ eps）生成参考线。
+///
+/// 只画真实成立的线——先吸附再推挤的流程里，推挤可能破坏对齐，这里宁可线消失，
+/// 也不画一条"线在但没对齐"的假线。
+pub fn alignment_guides(rect: &Rect, others: &[Rect], bounds: &Rect, eps: f32) -> Vec<AlignGuide> {
+    let (tx, ty) = align_targets(others, bounds);
+    let mut out: Vec<AlignGuide> = Vec::new();
+    let xs = [rect.x, rect.x + rect.w / 2.0, rect.right()];
+    let ys = [rect.y, rect.y + rect.h / 2.0, rect.bottom()];
+    for t in tx {
+        if !xs.iter().any(|v| (v - t).abs() <= eps) {
+            continue;
+        }
+        if out.iter().any(|g| g.vertical && (g.pos - t).abs() <= eps) {
+            continue;
+        }
+        let mut top = rect.y;
+        let mut bottom = rect.bottom();
+        for o in others {
+            if [o.x, o.x + o.w / 2.0, o.right()]
+                .iter()
+                .any(|v| (v - t).abs() <= eps)
+            {
+                top = top.min(o.y);
+                bottom = bottom.max(o.bottom());
+            }
+        }
+        out.push(AlignGuide {
+            vertical: true,
+            pos: t,
+            from: top,
+            to: bottom,
+        });
+    }
+    for t in ty {
+        if !ys.iter().any(|v| (v - t).abs() <= eps) {
+            continue;
+        }
+        if out.iter().any(|g| !g.vertical && (g.pos - t).abs() <= eps) {
+            continue;
+        }
+        let mut left = rect.x;
+        let mut right = rect.right();
+        for o in others {
+            if [o.y, o.y + o.h / 2.0, o.bottom()]
+                .iter()
+                .any(|v| (v - t).abs() <= eps)
+            {
+                left = left.min(o.x);
+                right = right.max(o.right());
+            }
+        }
+        out.push(AlignGuide {
+            vertical: false,
+            pos: t,
+            from: left,
+            to: right,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -344,6 +509,51 @@ mod tests {
 
     fn gap() -> f32 {
         FENCE_GAP
+    }
+
+    #[test]
+    fn snap_move_aligns_edge_within_threshold() {
+        let screen = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let neighbor = Rect::new(100.0, 100.0, 200.0, 100.0);
+        let r = Rect::new(104.0, 300.0, 200.0, 100.0); // 左边缘差 4px
+        let out = snap_move(&r, &[neighbor], &screen, SNAP_DIST);
+        assert_eq!(out.x, 100.0);
+        assert_eq!(out.y, 300.0);
+        // 超出阈值不吸附
+        let far = Rect::new(120.0, 300.0, 200.0, 100.0);
+        assert_eq!(snap_move(&far, &[neighbor], &screen, SNAP_DIST), far);
+    }
+
+    #[test]
+    fn snap_resize_moves_only_free_edge() {
+        let screen = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let neighbor = Rect::new(302.0, 500.0, 100.0, 100.0);
+        let r = Rect::new(100.0, 100.0, 200.0, 100.0);
+        let out = snap_resize(&r, &[neighbor], &screen, FreeSides::Right, SNAP_DIST);
+        assert_eq!(out.right(), 302.0); // 右边被吸到邻居左边缘
+        assert_eq!(out.x, 100.0); // 锚定边不动
+    }
+
+    #[test]
+    fn alignment_guides_span_aligned_objects() {
+        let screen = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let r = Rect::new(100.0, 100.0, 200.0, 100.0);
+        let o = Rect::new(100.0, 300.0, 200.0, 100.0);
+        let g = alignment_guides(&r, &[o], &screen, 0.5);
+        let line = g
+            .iter()
+            .find(|x| x.vertical && (x.pos - 100.0).abs() < 0.01)
+            .expect("左边缘对齐应产生竖线");
+        assert_eq!(line.from, 100.0);
+        assert_eq!(line.to, 400.0);
+    }
+
+    #[test]
+    fn alignment_guides_empty_when_not_aligned() {
+        let screen = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let r = Rect::new(100.0, 100.0, 200.0, 100.0);
+        let o = Rect::new(500.0, 500.0, 200.0, 100.0);
+        assert!(alignment_guides(&r, &[o], &screen, 0.5).is_empty());
     }
 
     #[test]
@@ -449,6 +659,16 @@ mod tests {
         assert_eq!(out_b.y, 200.0);
         assert_eq!(out_b.right(), 750.0 - g); // 右缘停在邻居左缘 - gap
         assert_eq!(out_b.bottom(), 500.0); // 夹完已隔开，下缘保持提案位置
+    }
+
+    #[test]
+    fn resize_never_collapses_to_zero_width() {
+        // 栅栏已经在屏幕右缘之外：旧实现会把宽度压成 0（"缩成一条线"）
+        let screen = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let b = Rect::new(2000.0, 100.0, 300.0, 200.0);
+        let out = settle_resize(&b, &[], &screen, FreeSides::Right, 200.0, 60.0, 12.0);
+        assert!(out.w >= 200.0, "width={}", out.w);
+        assert!(out.h >= 60.0, "height={}", out.h);
     }
 
     #[test]

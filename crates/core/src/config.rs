@@ -20,6 +20,20 @@ pub struct AppSettings {
     /// 是否允许栅栏相互叠加（关闭时移动/缩放强制保持间距）。
     #[serde(default)]
     pub allow_fence_overlap: bool,
+    /// 栅栏之间的最小间距（逻辑 px）。
+    #[serde(default = "default_fence_gap")]
+    pub fence_gap: f32,
+    /// 栅栏离屏幕/工作区边缘的安全留白（逻辑 px）。
+    #[serde(default = "default_desktop_inset")]
+    pub desktop_inset: f32,
+}
+
+fn default_fence_gap() -> f32 {
+    12.0
+}
+
+fn default_desktop_inset() -> f32 {
+    12.0
 }
 
 impl Default for AppSettings {
@@ -30,6 +44,8 @@ impl Default for AppSettings {
             hotkeys: HotkeyConfig::default(),
             autostart: false,
             allow_fence_overlap: false,
+            fence_gap: 12.0,
+            desktop_inset: 12.0,
         }
     }
 }
@@ -57,7 +73,7 @@ pub fn normalize(mut desk: Desk) -> Desk {
 fn migrate(desk: &mut Desk) {
     // v1 → v2：把旧版 `Icon.added` 迁移为显式来源字段；同时保持旧字段同步，
     // 让配置仍可被旧版本读取。同时初始化撤销队列/抑制路径的默认值。
-    desk.version = desk.version.max(3);
+    desk.version = desk.version.max(4);
     for icon in desk.icons.values_mut() {
         if icon.added {
             icon.origin = crate::model::ItemOrigin::Collected;
@@ -74,6 +90,11 @@ fn migrate(desk: &mut Desk) {
         }
         for path in &mut fence.suppressed_paths {
             *path = path.to_ascii_lowercase();
+        }
+        // v3 → v4：裸 icon_size（32/48/64）迁移为单元格档位。一个档位同时决定
+        // 格宽/格高/图标/名称行，避免"三档只有图标变、其余靠猜"。
+        if let Some(icon) = fence.appearance.legacy_icon_size.take() {
+            fence.appearance.cell = crate::model::CellSize::nearest(icon);
         }
     }
     desk.undo.clamp();
@@ -106,9 +127,23 @@ mod tests {
         let mut desk = Desk::new(AppSettings::default());
         desk.fences.push(fence(Some(r"D:\Portal")));
         let desk = normalize(desk);
-        assert_eq!(desk.version, 3);
+        assert_eq!(desk.version, 4);
         assert_eq!(desk.fences[0].kind, FenceKind::FolderPortal);
         assert_eq!(desk.fences[0].suppressed_paths[0], "c:\\temp\\x");
+    }
+
+    #[test]
+    fn legacy_icon_size_migrates_to_cell_tier() {
+        let mut desk = Desk::new(AppSettings::default());
+        let mut f = fence(None);
+        f.appearance.legacy_icon_size = Some(64.0);
+        desk.fences.push(f);
+        let desk = normalize(desk);
+        assert_eq!(
+            desk.fences[0].appearance.cell,
+            crate::model::CellSize::Large
+        );
+        assert_eq!(desk.fences[0].appearance.legacy_icon_size, None);
     }
 
     #[test]

@@ -214,6 +214,30 @@
 
 ---
 
+### 2.10 长时间运行稳定性修复
+
+- **误报 WM_MOUSELEAVE**：`SetWindowRgn` 更新区域时可能误发离开消息；若光标实际仍在
+  栅栏/图标上，不再清空悬停，避免 HoverLeave→HoverEnter 每帧循环导致动画定时器永不停止。
+- **动画看门狗**：任何动画批次超过 2 秒强制清空并停止 `ANIM_TIMER`，避免异常状态
+  持续 16ms 全量重绘（Windows 会以应用无响应/0xCFFFFFFF 终止进程）。
+- **日志降噪**：合成器每帧 `present` 细节从 `debug` 降到 `trace`，避免长时间运行产生
+  数十 MB 日志与 UI 线程 I/O 抖动。
+- **桌面 Shell 菜单预热**（默认关闭，`SYLVA_PRIME_SHELL=1` 恢复）：启动期预热会把
+  上下文菜单扩展在本进程内加载；这些扩展并非线程安全，后台 STA 与 UI 线程的 Shell
+  调用可能互相等待，表现为整窗「未响应」。改为按需预热（右键时 `ensure_primed`
+  泵送消息等待），代价只是每种文件类型第一次右键稍慢。
+- **卡死定位（`data/logs/hang.log`）**：新增看门狗线程，UI 线程按阶段埋点
+  （ENTER/HANDLE/SCENE/PRESENT/HIT/SAVE/SYNC/TRIM/MODAL）。同一阶段停留 > 2.5s 记为
+  `STALL ... phase=... event=...`；每秒重绘 ≥ 25 帧记为 `STORM fps=... event=...`
+  （自激重绘会拖到无响应）。日志直接同步写文件，进程被 WER 结束也能保留。
+
+  > 2026-11-15 两次 `AppHangB1`（19:44、20:52，退出码 0xCFFFFFFF）发生在加入启动期
+  > Shell 预热之后；事件日志显示 `sylva-app 未响应`，加载模块含 `ntshrui`/
+  > `thumbcache`/`PhotoMetadataHandler` 等上下文菜单扩展。先关预热复测，若仍复现按
+  > `hang.log` 的 `phase` 定位。
+
+---
+
 ## 6. 已知边界 / 后续
 
 1. **单 overlay + 命中矩形**：需求 §4.2 原写“每个栅栏 overlay”，本轮按 D2 改为
